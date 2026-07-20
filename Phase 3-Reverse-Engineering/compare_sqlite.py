@@ -591,7 +591,12 @@ def generate_report(schema_diff, dump_diff, old_label, new_label) -> str:
         for tname, cols in schema_diff["columns_added"].items():
             lines.append(f"\n**Table : `{tname}`**")
             for c in cols:
-                lines.append(f"- `+ {c.name} ({c.type})`")
+                attrs = [c.type]
+                if c.notnull: attrs.append("NOT NULL")
+                if c.default is not None: attrs.append(f"DEFAULT {c.default}")
+                if c.pk > 0: attrs.append(f"PK({c.pk})")
+                attr_str = ", ".join(attrs)
+                lines.append(f"- `+ {c.name} ({attr_str})`")
     else:
         lines.append("Aucune")
 
@@ -601,7 +606,12 @@ def generate_report(schema_diff, dump_diff, old_label, new_label) -> str:
         for tname, cols in schema_diff["columns_removed"].items():
             lines.append(f"\n**Table : `{tname}`**")
             for c in cols:
-                lines.append(f"- `- {c.name} ({c.type})`")
+                attrs = [c.type]
+                if c.notnull: attrs.append("NOT NULL")
+                if c.default is not None: attrs.append(f"DEFAULT {c.default}")
+                if c.pk > 0: attrs.append(f"PK({c.pk})")
+                attr_str = ", ".join(attrs)
+                lines.append(f"- `- {c.name} ({attr_str})`")
     else:
         lines.append("Aucune")
 
