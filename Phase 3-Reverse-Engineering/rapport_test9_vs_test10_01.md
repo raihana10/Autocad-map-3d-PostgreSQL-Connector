@@ -67,3 +67,8 @@ _3 ligne(s) ajoutee(s)_
 - `+ {'ID': 1, 'SHORT_VALUE': '', 'VALUE': 'Acier', 'DATE_OF_CREATION': None, 'DESIGNER': None, 'COMMENTARY': '', 'ACTIVE': 1, 'PRIORITY': None}`
 - `+ {'ID': 2, 'SHORT_VALUE': '', 'VALUE': 'PVC', 'DATE_OF_CREATION': None, 'DESIGNER': None, 'COMMENTARY': '', 'ACTIVE': 1, 'PRIORITY': None}`
 - `+ {'ID': 3, 'SHORT_VALUE': '', 'VALUE': 'Fonte', 'DATE_OF_CREATION': None, 'DESIGNER': None, 'COMMENTARY': '', 'ACTIVE': 1, 'PRIORITY': None}`
+
+
+## Interprétation
+
+Un domaine est matérialisé par sa propre table de valeurs (ex: `TEST_DOMAINE_10_TBD`) et son enregistrement dans la table du catalogue des domaines `TB_DOMAIN`.

@@ -68,3 +68,8 @@ _1 ligne(s) modifiee(s)_
 _1 ligne(s) modifiee(s)_
 - Ligne `['ID']=(2,)` :
   - `FLY_HEIGHT` : `54` -> `27`
+
+
+## Interprétation
+
+L'UI nomme les classes pour l'utilisateur via la colonne `CAPTION` de `TB_DICTIONARY`. Le nom physique en arrière-plan (`F_CLASS_NAME`) et celui de la table SQLite elle-même ne sont jamais altérés pour préserver l'intégrité relationnelle.

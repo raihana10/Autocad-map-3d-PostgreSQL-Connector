@@ -78,3 +78,8 @@ _1 ligne(s) modifiee(s)_
 
 _1 ligne(s) ajoutee(s)_
 - `+ {'f_table_name': 'TEST_CLASSE_01', 'f_column_name': 'TEST_ATTRIBUT_09', 'f_column_desc': 'Number', 'fdo_data_type': 7, 'fdo_data_details': 0, 'fdo_data_length': 0, 'fdo_data_precision': 10, 'fdo_data_scale': 0}`
+
+
+## Interprétation
+
+La création d'une relation métier génère une définition SQL stockée dans `TB_RELATIONS` contenant la table parente, la table fille et leurs clés. Un INDEX est également créé sur la colonne enfant pour les performances.

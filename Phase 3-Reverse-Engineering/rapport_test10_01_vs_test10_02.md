@@ -78,3 +78,8 @@ _1 ligne(s) modifiee(s)_
 
 _1 ligne(s) ajoutee(s)_
 - `+ {'f_table_name': 'TEST_CLASSE_01', 'f_column_name': 'TEST_ATTRIBUT_10', 'f_column_desc': 'Number', 'fdo_data_type': 7, 'fdo_data_details': 0, 'fdo_data_length': 0, 'fdo_data_precision': 10, 'fdo_data_scale': 0}`
+
+
+## Interprétation
+
+Spécifier qu'un attribut se réfère à un domaine de valeurs génère une relation PARENT_TABLE_NAME = NomDeLaTableDuDomaine dans `TB_RELATIONS` et un INDEX sur l'attribut.

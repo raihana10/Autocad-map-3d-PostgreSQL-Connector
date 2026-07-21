@@ -73,3 +73,8 @@ _1 ligne(s) modifiee(s)_
 
 _1 ligne(s) ajoutee(s)_
 - `+ {'f_table_name': 'TEST_CLASSE_01', 'f_column_name': 'TEST_ATTRIBUT_05', 'f_column_desc': 'Varchar2', 'fdo_data_type': 9, 'fdo_data_details': 0, 'fdo_data_length': 10, 'fdo_data_precision': 0, 'fdo_data_scale': 0}`
+
+
+## Interprétation
+
+La contrainte stricte (obligatoire) est traduite par un NOT NULL dans le schéma de base de données.

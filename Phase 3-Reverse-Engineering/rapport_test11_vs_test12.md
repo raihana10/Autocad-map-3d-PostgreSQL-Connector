@@ -117,3 +117,8 @@ _8 ligne(s) ajoutee(s)_
 - `+ {'f_table_name': 'TEST_CLASSE_01', 'f_column_name': 'MODEL_NAME', 'f_column_desc': 'Varchar2', 'fdo_data_type': 9, 'fdo_data_details': 0, 'fdo_data_length': 255, 'fdo_data_precision': 0, 'fdo_data_scale': 0}`
 - `+ {'f_table_name': 'TEST_CLASSE_FILLE_01', 'f_column_name': 'FID', 'f_column_desc': 'Number', 'fdo_data_type': 7, 'fdo_data_details': 2, 'fdo_data_length': 0, 'fdo_data_precision': 18, 'fdo_data_scale': 0}`
 - `+ {'f_table_name': 'TEST_CLASSE_FILLE_01', 'f_column_name': 'TEST_ATTRIBUT_09', 'f_column_desc': 'Number', 'fdo_data_type': 7, 'fdo_data_details': 0, 'fdo_data_length': 0, 'fdo_data_precision': 10, 'fdo_data_scale': 0}`
+
+
+## Interprétation
+
+L'héritage d'Autodesk déploie un système d'héritage « physique ». La table fille `TEST_CLASSE_FILLE_01` obtient dans son DDL l'ensemble des colonnes d'attributs héritées de sa classe parente, qui est elle notée dans `TB_DICTIONARY.MODEL_F_CLASS_ID`.

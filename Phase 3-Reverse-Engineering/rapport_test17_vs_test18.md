@@ -67,3 +67,8 @@ _1 ligne(s) supprimee(s)_
 
 _1 ligne(s) supprimee(s)_
 - `- {'f_table_name': 'TEST_CLASSE_01', 'f_column_name': 'TEST_ATTRIBUT_01', 'f_column_desc': 'Varchar2', 'fdo_data_type': 9, 'fdo_data_details': 0, 'fdo_data_length': 10, 'fdo_data_precision': 0, 'fdo_data_scale': 0}`
+
+
+## Interprétation
+
+Comme pour les classes, l'attribut est détruit complètement (DROP COLUMN sur la table) ainsi que de son enregistrement dans `TB_ATTRIBUTE` et `fdo_columns`.

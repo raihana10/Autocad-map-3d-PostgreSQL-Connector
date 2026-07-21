@@ -107,3 +107,8 @@ _2 ligne(s) ajoutee(s)_
 
 _1 ligne(s) ajoutee(s)_
 - `+ {'f_table_name': 'TEST_CLASS_GEO_02', 'f_geometry_column': 'GEOM', 'geometry_type': 2, 'geometry_dettype': 2578, 'coord_dimension': 0, 'srid': 0, 'geometry_format': 'FGF'}`
+
+
+## Interprétation
+
+Les classes de lignes se distinguent par F_CLASS_TYPE='L' et geometry_type=2 dans `geometry_columns`. Les attributs propres aux lignes (comme LENGTH) sont générés automatiquement.

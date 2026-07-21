@@ -73,3 +73,8 @@ _1 ligne(s) modifiee(s)_
 
 _1 ligne(s) ajoutee(s)_
 - `+ {'f_table_name': 'TEST_CLASSE_01', 'f_column_name': 'TEST_ATTRIBUT_02', 'f_column_desc': 'Number', 'fdo_data_type': 7, 'fdo_data_details': 0, 'fdo_data_length': 0, 'fdo_data_precision': 10, 'fdo_data_scale': 0}`
+
+
+## Interprétation
+
+Le format numérique de l'attribut est directement traduit dans le DDL de la table physique (INTEGER) et spécifié dans `fdo_columns` (type 7, desc Number, precision 10).

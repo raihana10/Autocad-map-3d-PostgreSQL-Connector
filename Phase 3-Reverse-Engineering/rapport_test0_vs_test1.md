@@ -131,3 +131,8 @@ _5 ligne(s) ajoutee(s)_
 
 _1 ligne(s) ajoutee(s)_
 - `+ {'f_table_name': 'TEST_CLASSE_01', 'f_column_name': 'FID', 'f_column_desc': 'Number', 'fdo_data_type': 7, 'fdo_data_details': 2, 'fdo_data_length': 0, 'fdo_data_precision': 18, 'fdo_data_scale': 0}`
+
+
+## Interprétation
+
+L'ajout d'une classe crée une véritable table physique (via DDL) et déclenche l'insertion de métadonnées dans les tables systèmes (`TB_DICTIONARY`, `TB_ATTRIBUTE`, `fdo_columns`) ainsi que des triggers dédiés pour l'autogénération des séquences et contraintes.

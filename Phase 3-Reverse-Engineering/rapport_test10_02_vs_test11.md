@@ -60,3 +60,8 @@ Aucun
 
 _1 ligne(s) ajoutee(s)_
 - `+ {'ID': 4, 'SHORT_VALUE': '', 'VALUE': 'Cuivre ', 'DATE_OF_CREATION': None, 'DESIGNER': None, 'COMMENTARY': '', 'ACTIVE': 1, 'PRIORITY': None}`
+
+
+## Interprétation
+
+Ajouter une valeur à un domaine métier consiste simplement en une insertion de données incrémentale dans la table dédiée au domaine métier, sans aucun impact sur la structure de la base.

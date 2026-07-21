@@ -109,3 +109,8 @@ _7 ligne(s) supprimee(s)_
 - `- {'f_table_name': 'TEST_CLASSE_FILLE_01', 'f_column_name': 'FID', 'f_column_desc': 'Number', 'fdo_data_type': 7, 'fdo_data_details': 2, 'fdo_data_length': 0, 'fdo_data_precision': 18, 'fdo_data_scale': 0}`
 - `- {'f_table_name': 'TEST_CLASSE_FILLE_01', 'f_column_name': 'TEST_ATTRIBUT_03', 'f_column_desc': 'Number', 'fdo_data_type': 7, 'fdo_data_details': 0, 'fdo_data_length': 0, 'fdo_data_precision': 10, 'fdo_data_scale': 0}`
 - `- {'f_table_name': 'TEST_CLASSE_FILLE_01', 'f_column_name': 'TEST_ATTRIBUT_09', 'f_column_desc': 'Number', 'fdo_data_type': 7, 'fdo_data_details': 0, 'fdo_data_length': 0, 'fdo_data_precision': 10, 'fdo_data_scale': 0}`
+
+
+## Interprétation
+
+Autodesk applique un (hard delete) : la table de la classe contenant la donnée est totalement supprimée (`DROP`). En cascade, toutes les traces de catalogues (`TB_DICTIONARY`, `TB_ATTRIBUTE`, `TB_RELATIONS`) sont détruites.

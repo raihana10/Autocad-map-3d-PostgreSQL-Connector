@@ -116,3 +116,8 @@ _4 ligne(s) ajoutee(s)_
 
 _1 ligne(s) ajoutee(s)_
 - `+ {'f_table_name': 'TEST_CLASSE_GEO_01', 'f_geometry_column': 'GEOM', 'geometry_type': 1, 'geometry_dettype': 1, 'coord_dimension': 0, 'srid': 0, 'geometry_format': 'FGF'}`
+
+
+## Interprétation
+
+Une classe géométrique est signalée par F_CLASS_TYPE='P' dans `TB_DICTIONARY`. Une référence géométrique est centralisée dans `geometry_columns` et les colonnes structurelles comme GEOM, Z, ORIENTATION, et QUALITY sont créées et indexées.
