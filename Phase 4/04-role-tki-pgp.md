@@ -98,12 +98,9 @@ Cette comparaison reste factuelle et documentaire : elle ne préjuge pas encore 
 | 7 | L'éditeur est présenté selon les cas comme TKI Software ou TKI Chemnitz | **[DOCUMENTÉ]** | [3] [4] [5] |
 | 8 | L'argument économique (éviter les coûts Oracle/SQL Server) est mis en avant par TKI | **[DOCUMENTÉ]** | [2] |
 | 9 | TKI PGP est distinct de TKI NET (solution métier FTTx complète) | **[DOCUMENTÉ]** | Cf. README du projet, §1.3 |
-| 10 | Date de création / première version de PGP | **[À VÉRIFIER]** | Non trouvée dans les sources publiques consultées |
-| 11 | PGP crée-t-il un schéma PostgreSQL entièrement nouveau à partir du Data Model, ou reproduit-il une structure Oracle/SQL Server existante ? | **[À VÉRIFIER]** | Question ouverte n°2 du README ; aucune source ne détaille le mécanisme interne |
-| 12 | PGP reproduit-il un mécanisme de verrouillage / check-out / check-in multi-utilisateur ? | **[À VÉRIFIER]** | Non documenté dans les pages consultées |
-| 13 | PGP s'appuie-t-il sur le connecteur FDO PostgreSQL déjà natif à Map 3D, ou implémente-t-il sa propre couche d'accès ? | **[HYPOTHÈSE]** | Probable au vu de l'écosystème Autodesk, mais non confirmé par une source officielle |
-| 14 | Le prix / modèle tarifaire exact de la licence PGP | **[À VÉRIFIER]** | Non public sur les pages consultées |
-| 15 | PGP gère-t-il les règles métier et les formulaires (Formulaire-Designer), ou uniquement le stockage/géométries ? | **[À VÉRIFIER]** | Recoupe la question ouverte n°7 du README |
+| 10 | PGP crée-t-il un schéma PostgreSQL entièrement nouveau à partir du Data Model, ou reproduit-il une structure Oracle/SQL Server existante ? | **[À VÉRIFIER]** | Question ouverte n°2 du README ; aucune source ne détaille le mécanisme interne |
+| 11 | PGP s'appuie-t-il sur le connecteur FDO PostgreSQL déjà natif à Map 3D, ou implémente-t-il sa propre couche d'accès ? | **[HYPOTHÈSE]** | Probable au vu de l'écosystème Autodesk, mais non confirmé par une source officielle |
+| 12 | PGP gère-t-il les règles métier et les formulaires (Formulaire-Designer), ou uniquement le stockage/géométries ? | **[À VÉRIFIER]** | Recoupe la question ouverte n°7 du README |
 
 ---
 
@@ -122,7 +119,7 @@ Ces questions ne sont **pas** traitées ici : elles sont transmises telles quell
 
 ## 6. Pistes pour la Phase 5
 
-Cette analyse de TKI PGP met en évidence quatre fonctions-clés que la solution alternative devra reproduire à un niveau équivalent : génération/synchronisation du schéma PostgreSQL/PostGIS, intégration aux workflows de l'Infrastructure Administrator, import/export de données, et accès en lecture/écriture depuis Map 3D (SQL sheet ou équivalent). La conception détaillée de cette solution — choix d'architecture, technologies, spécification fonctionnelle complète — fait l'objet du document `05-architecture-cible.md`, et n'est volontairement pas anticipée ici.
+Cette analyse de TKI PGP met en évidence quatre fonctions-clés que la solution alternative devra reproduire à un niveau équivalent : génération/synchronisation du schéma PostgreSQL/PostGIS, intégration aux workflows de l'Infrastructure Administrator, import/export de données, et accès en lecture/écriture depuis Map 3D (SQL sheet ou équivalent). La conception détaillée de cette solution - choix d'architecture, technologies, spécification fonctionnelle - complète fait l'objet du document `05-architecture-cible.md`.
 
 ---
 
