@@ -218,7 +218,7 @@ python compare_sqlite.py schema_testN.sql schema_testN1.sql \\
   2. Sauvegarder le Data Model.
   3. Copier le fichier SQLite résultant.
   4. Comparer avec l'état du Test 0.
-- **Ce qu'il faut observer** : apparition d'une nouvelle ligne dans une table de type « catalogue de classes » ; valeur du nom de classe ; présence d'un identifiant technique (ID) généré automatiquement.
+- **Ce que l'on a observé** : apparition d'une nouvelle ligne dans une table de type « catalogue de classes » ; valeur du nom de classe ; présence d'un identifiant technique (ID) généré automatiquement.
 - **Tables SQLite susceptibles d'être modifiées** : `CLASSDEFINITION` (ou équivalent), éventuellement une table de métadonnées ou de version incrémentée.
 - **Résultat attendu** : une nouvelle ligne correspondant exactement au nom `TEST_CLASSE_01`, avec un identifiant unique.
 - **Capture d'écran à réaliser** : capture de la classe créée dans l'arborescence Infrastructure Administrator ; capture de la nouvelle ligne dans DB Browser for SQLite.
@@ -299,14 +299,17 @@ python compare_sqlite.py schema_testN.sql schema_testN1.sql \\
 ### Test 8 — Changement du type de géométrie
 
 - **Objectif** : localiser le stockage du type de géométrie (Point, Ligne, Polygone).
-- **Modification réalisée** : changer le type de géométrie de `TEST_CLASSE_GEO_01` de Point vers Ligne (Polyline).
+- **Modification réalisée** : création d'une nouvelle classe  `TEST_CLASSE_GEO_08`  avec le type Line String (Polyline).
 - **Procédure détaillée** :
-  1. Modifier uniquement le type géométrique.
+  1. créer la nouvelle classe `TEST_CLASSE_GEO_08` 
   2. Sauvegarder et comparer avec l'état du Test 7.
 - **Ce qu'il faut observer** : changement d'une valeur (code numérique ou texte) dans la table géométrique identifiée au Test 7.
 - **Tables SQLite susceptibles d'être modifiées** : `GEOMETRYDEFINITION` (colonne type de géométrie).
 - **Résultat attendu** : la colonne type géométrie passe d'une valeur « Point » à une valeur « Ligne » (ou codes numériques correspondants).
 - **Capture d'écran à réaliser** : capture avant/après dans Infrastructure Administrator ; capture du diff SQLite.
+
+  ![Capture du Test 8](Test8/Screenshot%202026-07-16%20113143.png)
+
 - **Conclusion à noter** : Identifiant de type de classe devient `L` (Ligne) et `geometry_type` vaut 2 dans `geometry_columns`.
 
 ### Test 9 — Ajout d'une relation entre deux classes
@@ -316,37 +319,65 @@ python compare_sqlite.py schema_testN.sql schema_testN1.sql \\
 - **Procédure détaillée** :
   1. Créer la relation via l'outil dédié d'Infrastructure Administrator.
   2. Sauvegarder et comparer.
-- **Ce qu'il faut observer** : nouvelle table ou nouvelles lignes référençant les deux classes via leurs identifiants respectifs ; encodage de la cardinalité.
-- **Tables SQLite susceptibles d'être modifiées** : `RELATIONSHIPDEFINITION` (ou équivalent), éventuellement des colonnes de cardinalité (min/max occurrences).
+- **Observation** : nouvelle table ou nouvelles lignes référençant les deux classes via leurs identifiants respectifs ; encodage de la cardinalité.
+- **Tables SQLite modifiées** : `TB_RELATIONS` (nouvelle ligne décrivant parent/enfant), `TEST_CLASSE_01` (nouvelle colonne FK), `TB_ATTRIBUTE` et `fdo_columns` (déclaration de l'attribut).
 - **Résultat attendu** : une ligne référençant les deux identifiants de classes avec un type/cardinalité de relation.
-- **Capture d'écran à réaliser** : capture de la relation créée dans Infrastructure Administrator ; capture de la ligne SQLite correspondante.
-- **Conclusion à noter** : AutoCAD crée une entrée dans `TB_RELATIONS` contenant le nom complet des tables Parent/Child et leurs clés, et génère explicitement un INDEX sur la colonne Child.
 
-### Test 10 — Ajout d'un domaine de valeurs
+
+  ![Capture du Test 9 - vue 1](Test9/Screenshot%202026-07-16%20114643.png)
+
+  ![Capture du Test 9 - vue 2](Test9/Screenshot%202026-07-16%20114658.png)
+
+- **Conclusion** : la relation 1-N ne se limite pas à une simple description dans `TB_RELATIONS` : elle se matérialise aussi par l'ajout d'une colonne FK physique dans la table enfant, déclarée dans `TB_ATTRIBUTE` et `fdo_columns`, avec un index dédié. En revanche, aucune cardinalité (`MERGE_MODE` / `SPLIT_MODE`) n'a été enregistrée dans ce test simple ; un test complémentaire serait nécessaire pour vérifier où elle est stockée.
+
+### Test 10.1 — Création d'un domaine de valeurs
 
 - **Objectif** : localiser le stockage des domaines de valeurs (listes de valeurs autorisées, énumérations).
-- **Modification réalisée** : créer un domaine `TEST_DOMAINE_01` avec deux ou trois valeurs (ex. `Acier`, `PVC`, `Fonte`).
+- **Modification réalisée** : créer un domaine `TEST_DOMAINE_10` avec  trois valeurs (ex. `Acier`, `PVC`, `Fonte`).
 - **Procédure détaillée** :
   1. Créer le domaine avec ses valeurs.
   2. Sauvegarder et comparer.
-- **Ce qu'il faut observer** : une table « catalogue de domaines » et une table « valeurs de domaine » liée par clé étrangère.
-- **Tables SQLite susceptibles d'être modifiées** : `DOMAIN` (ou équivalent), `DOMAINVALUE` (ou équivalent).
-- **Résultat attendu** : une ligne de domaine et plusieurs lignes de valeurs associées.
-- **Capture d'écran à réaliser** : capture du domaine créé dans Infrastructure Administrator ; capture des deux tables SQLite concernées.
-- **Conclusion à noter** : Mapping vers une table de définition `TB_DOMAIN` et création d'une table SQL propre au domaine (ex: `TEST_DOMAINE_10_TBD`) contenant les valeurs.
+- **Observation** : un catalogue de domaines et une table dédiée contenant les valeurs du domaine.
+- **Tables SQLite modifiées** : `TB_DOMAIN` (catalogue des domaines), et une table dédiée générée dynamiquement portant le nom du domaine (ex. `TEST_DOMAINE_10_TBD`) contenant les valeurs.
+- **Résultat attendu** : une ligne de domaine dans `TB_DOMAIN` et plusieurs lignes de valeurs associées dans la table dédiée du domaine.
+
+
+ 
+- **Conclusion** : un domaine est matérialisé par son enregistrement dans `TB_DOMAIN` et par une table de valeurs dédiée (ex. `TEST_DOMAINE_10_TBD`).
+
+### Test 10.2 — Rattachement d'un attribut à un domaine
+
+- **Objectif** : vérifier comment un attribut référencé à un domaine est matérialisé dans le SQLite.
+- **Modification réalisée** : créer un attribut `TEST_ATTRIBUT_10` dans `TEST_CLASSE_01` puis l'associer au domaine `TEST_DOMAINE_10`.
+- **Procédure détaillée** :
+  1. Ajouter l'attribut à la classe métier.
+  2. Spécifier le domaine de valeurs dans l'interface.
+  3. Sauvegarder et comparer avec l'état du Test 10.1.
+- **Observation** : l'ajout d'une colonne FK physique dans la classe enfant, ainsi qu'une ligne de relation dans `TB_RELATIONS` pointant vers la table du domaine.
+- **Tables SQLite modifiées (confirmé)** : `TB_RELATIONS` (ligne parent/enfant), `TEST_CLASSE_01` (nouvelle colonne FK), `TB_ATTRIBUTE` et `fdo_columns` (déclaration de l'attribut).
+- **Résultat attendu** : une ligne dans `TB_RELATIONS` où `PARENT_TABLE_NAME` pointe vers la table du domaine, avec une colonne physique ajoutée à la table enfant.
+
+
+ - **Conclusion** :  le rattachement d'un attribut à un domaine utilise exactement le même mécanisme qu'une relation classe-à-classe (Test 9) : ajout d'une colonne FK physique dans la table enfant, et une ligne `TB_RELATIONS` où `PARENT_TABLE_NAME` pointe vers la table du domaine plutôt que vers une classe métier. Aucune cardinalité (`MERGE_MODE` / `SPLIT_MODE`) n'a été enregistrée dans ce test simple ; un test complémentaire serait nécessaire pour vérifier où elle est stockée.
+  ![Capture du Test 10 - vue 1](Test10/Screenshot%202026-07-16%20122339.png)
+
+  ![Capture du Test 10 - vue 2](Test10/Screenshot%202026-07-16%20122411.png)
 
 ### Test 11 — Modification d'un domaine
 
 - **Objectif** : observer l'effet de l'ajout/suppression d'une valeur dans un domaine existant.
-- **Modification réalisée** : ajouter une nouvelle valeur (`Cuivre`) au domaine `TEST_DOMAINE_01`.
+- **Modification réalisée** : ajouter une nouvelle valeur (`Cuivre`) au domaine `TEST_DOMAINE_10`.
 - **Procédure détaillée** :
   1. Ajouter uniquement cette valeur.
   2. Sauvegarder et comparer avec l'état du Test 10.
-- **Ce qu'il faut observer** : nouvelle ligne dans la table des valeurs de domaine, sans modification de la ligne « catalogue » du domaine (sauf éventuellement un numéro de version).
-- **Tables SQLite susceptibles d'être modifiées** : `DOMAINVALUE` (ou équivalent).
-- **Résultat attendu** : une ligne supplémentaire uniquement.
-- **Capture d'écran à réaliser** : capture de la nouvelle valeur dans Infrastructure Administrator ; capture du diff SQLite.
-- **Conclusion à noter** : Validé, ajout simple de type `INSERT` dans la table SQL cible, tout à fait incrémental.
+- **Observation** : une nouvelle ligne dans la table des valeurs de domaine, sans modification de la ligne « catalogue » du domaine (sauf éventuellement un numéro de version).
+- **Tables SQLite modifiées** : la table dédiée du domaine créée au Test 10.1 (ici `TEST_DOMAINE_10_TBD`) — aucune autre table, ni `TB_DOMAIN`, ni structure, n'a été touchée.
+- **Résultat observé** : une ligne supplémentaire uniquement.
+- **Capture d'écran réalisée** : capture de la nouvelle valeur dans Infrastructure Administrator .
+
+  ![Capture du Test 11](Test11/Screenshot%202026-07-16%20141255.png)
+
+- **Conclusion** : ajout simple de type `INSERT` dans la table SQL cible, tout à fait incrémental.
 
 ### Test 12 — Héritage entre classes
 
@@ -355,26 +386,17 @@ python compare_sqlite.py schema_testN.sql schema_testN1.sql \\
 - **Procédure détaillée** :
   1. Créer la classe fille en spécifiant la classe parente.
   2. Sauvegarder et comparer.
-- **Ce qu'il faut observer** : une colonne de référence vers l'identifiant de la classe parente dans la table des classes.
-- **Tables SQLite susceptibles d'être modifiées** : `CLASSDEFINITION` (colonne parent/superclasse).
-- **Résultat attendu** : la ligne de la classe fille contient une clé étrangère vers la classe parente.
-- **Capture d'écran à réaliser** : capture de l'héritage dans Infrastructure Administrator ; capture de la colonne parent dans SQLite.
-- **Conclusion à noter** : L'héritage implique que la table fille regroupe (recopie physiquement) **toutes** les colonnes de la classe parente. Lien dans `TB_DICTIONARY.MODEL_F_CLASS_ID`.
+- **Observation** : l'héritage ne se limite pas à un simple lien de référence. La table fille est créée avec sa propre structure, puis reçoit l'ensemble des attributs hérités de la classe parente.
+- **Tables SQLite modifiées (confirmé)** : `TEST_CLASSE_FILLE_01` (nouvelle table, structure complète), `TB_DICTIONARY` (lien logique via `MODEL_F_CLASS_ID`, pas via `PARENT_F_CLASS_ID`), `TB_ATTRIBUTE` et `fdo_columns` (recopie de tous les attributs hérités), `TB_RELATIONS` (recopie des relations/domaines hérités), `TB_RULE_BASE` (règles système standard), `TEST_CLASSE_01` (ajout de `MODEL_NAME` sur la classe parente devenue « modèle »).
+- **Résultat observé** : la ligne de la classe fille est enregistrée dans `TB_DICTIONARY`, la table physique `TEST_CLASSE_FILLE_01` contient les colonnes héritées, et la classe parente reçoit un attribut `MODEL_NAME`.
+- **Capture d'écran réalisée** : capture de l'héritage dans Infrastructure Administrator ; capture du diff SQLite correspondant.
 
-### Test 13 — Nouvelle représentation graphique
+  ![Capture du Test 12 - vue 1](Test12/Screenshot%202026-07-16%20142017.png)
 
-- **Statut** : **ABANDONNÉ**
-- **Justification** : La symbologie et l'affichage (couleurs, épaisseur) relèvent de la couche présentation applicative (QGIS ou Map 3D client). Il n'y a aucun impact sur la modélisation structurelle SQL.
+  ![Capture du Test 12 - vue 2](Test12/Screenshot%202026-07-16%20142047.png)
 
-### Test 14 — Ajout d'un Label
+- **Conclusion** : l'héritage chez Autodesk/ArcFM n'est pas une simple clé étrangère — c'est un héritage physique complet. La table fille recopie structurellement toutes les colonnes de la classe parente, y compris celles issues de relations ou de domaines, qui sont elles-mêmes redéclarées dans `TB_RELATIONS`. Le lien logique parent-enfant est porté par `TB_DICTIONARY.MODEL_F_CLASS_ID`, et non par `PARENT_F_CLASS_ID` (qui référence une classe système générique, `ID = 1`).
 
-- **Statut** : **ABANDONNÉ**
-- **Justification** : Relève exclusivement de l'étiquetage de présentation.
-
-### Test 15 — Ajout d'un Template
-
-- **Statut** : **ABANDONNÉ**
-- **Justification** : Un template est un pur assistant UI de saisie. Ne touche pas le schéma logique SQLite.
 
 ### Test 16 — Renommage d'une classe
 
@@ -383,24 +405,32 @@ python compare_sqlite.py schema_testN.sql schema_testN1.sql \\
 - **Procédure détaillée** :
   1. Renommer la classe.
   2. Sauvegarder et comparer.
-- **Ce qu'il faut observer** : seule la colonne nom doit changer ; l'identifiant technique (clé primaire) et toutes les clés étrangères pointant vers cette classe doivent rester inchangés.
-- **Tables SQLite susceptibles d'être modifiées** : `CLASSDEFINITION` (colonne nom uniquement).
-- **Résultat attendu** : stabilité de l'identifiant technique malgré le changement de nom — point crucial pour la fiabilité du futur mapping.
-- **Capture d'écran à réaliser** : capture avant/après du nom ; capture du diff SQLite montrant l'identifiant inchangé.
-- **Conclusion à noter** : Seule la colonne `CAPTION` est altérée. Le nom de la table SQLite elle-même ne change pas, préservant la stabilité du modèle de données.
+- **Observation** : le renommage ne modifie pas l'identifiant technique ni le nom physique de la table SQLite.
+- **Tables SQLite modifiées (confirmé)** : `TB_DICTIONARY` uniquement — colonnes `CAPTION` (nom affiché) et `FEATURE_REPRESENTATION` (libellé dynamique généré, effet de bord du renommage). Aucun changement sur `F_CLASS_ID`, `F_CLASS_NAME`, ni sur le nom physique de la table SQLite.
+- **Résultat observé** : stabilité de l'identifiant technique malgré le changement de nom — point crucial pour la fiabilité du futur mapping.
+- **Capture d'écran réalisée** : capture avant/après du nom ; capture du diff SQLite montrant l'identifiant inchangé.
 
-### Test 17 —  Suppression d'une classe
+  ![Capture du Test 16](Test16/Screenshot%202026-07-16%20141255.png)
+
+- **Conclusion** : seule `TB_DICTIONARY.CAPTION` porte le nom affiché à l'utilisateur ; le renommage met aussi à jour `FEATURE_REPRESENTATION` (libellé par défaut des objets). Le nom physique de la table SQLite et l'identifiant technique (`F_CLASS_ID`) restent totalement stables, confirmant que le mapping technique est indépendant du nom métier affiché. 
+- Note annexe : un changement sans lien apparent (`TB_GN_FLYIN_USER.FLY_HEIGHT`) a aussi été observé — probablement un réglage de session sans rapport avec le test.
+
+### Test 17 — Suppression d'une classe
 
 - **Objectif** : observer la propagation de la suppression d'une classe sur les objets qui en dépendent (attributs, relations, domaines associés).
 - **Modification réalisée** : supprimer `TEST_CLASSE_FILLE_01`.
 - **Procédure détaillée** :
   1. Supprimer la classe.
   2. Sauvegarder et comparer.
-- **Ce qu'il faut observer** : suppression en cascade (ou non) des attributs et relations liés ; comportement des clés étrangères orphelines.
-- **Tables SQLite susceptibles d'être modifiées** : `CLASSDEFINITION`, `ATTRIBUTEDEFINITION`, `RELATIONSHIPDEFINITION`.
-- **Résultat attendu** : à déterminer — vérifier l'intégrité référentielle du fichier après suppression.
-- **Capture d'écran à réaliser** : capture de la suppression ; capture du diff SQLite sur l'ensemble des tables concernées.
-- **Conclusion à noter** : HARD DELETE applicable de la même manière sur une simple colonne (attribut drop).
+- **Observation** : la suppression d'une classe déclenche un retrait complet des objets associés à cette classe, sans laisser de résidu visible.
+- **Tables SQLite modifiées (confirmé)** : `TB_DICTIONARY`, `TB_ATTRIBUTE`, `TB_RELATIONS`, `TB_RULE_BASE`, `fdo_columns` — suppression en cascade totale de toutes les lignes créées au Test 12, plus `DROP TABLE TEST_CLASSE_FILLE_01`, ses index et ses triggers.
+- **Résultat observé** : disparition complète de la table fille, de ses index, de ses triggers, ainsi que de toutes les lignes de métadonnées associées.
+- **Capture d'écran réalisée** : capture de la suppression ; capture du diff SQLite sur l'ensemble des tables concernées.
+
+  ![Capture du Test 17](Test17/Screenshot%202026-07-16%20145204.png)
+
+- **Conclusion** : la suppression d'une classe applique un **hard delete en cascade complet et symétrique** à sa création — table, index, triggers, attributs, relations et règles sont tous supprimés sans laisser de résidu. La classe parente (`TEST_CLASSE_01`) n'est pas affectée, confirmant que l'héritage physique n'impacte que la table fille lors d'une suppression. 
+- Note annexe : `TB_GN_FLYIN_USER.FLY_HEIGHT` varie de nouveau (retour à sa valeur initiale) — probablement un réglage de session sans rapport avec le test.
 
 ### Test 18 — Suppression d'un attribut
 
@@ -409,69 +439,40 @@ python compare_sqlite.py schema_testN.sql schema_testN1.sql \\
 - **Procédure détaillée** :
   1. Supprimer l'attribut.
   2. Sauvegarder et comparer.
-- **Ce qu'il faut observer** : disparition complète de la ligne, ou au contraire présence d'une colonne de statut (ex. `deleted = 1`) sans suppression physique.
-- **Tables SQLite susceptibles d'être modifiées** : `ATTRIBUTEDEFINITION`.
-- **Résultat attendu** : à déterminer par l'observation — les deux comportements sont plausibles selon l'implémentation Autodesk.
-- **Capture d'écran à réaliser** : capture de la suppression dans Infrastructure Administrator ; capture du diff SQLite (ligne disparue ou marquée).
-- **Conclusion à noter** : C'est une destruction matérielle complète (HARD DELETE) de la table physique. Cela engendre le DROP CASCADE manuel des références metadata dans tous les catalogues.
+- **Observation** : la suppression d'un attribut provoque la disparition réelle de la colonne physique et du catalogue associé, sans marquage logique.
+- **Tables SQLite modifiées (confirmé)** : `TB_ATTRIBUTE` (déclaration catalogue), `fdo_columns` (déclaration FDO), et la table physique `TEST_CLASSE_01` elle-même (colonne réellement supprimée du schéma SQL, vrai `DROP COLUMN`).
+- **Résultat observé** : suppression physique de la colonne, avec nettoyage en cascade des métadonnées associées.
+- **Capture d'écran réalisée** : capture de la suppression dans Infrastructure Administrator ; capture du diff SQLite (ligne disparue ou marquée).
 
-### Test 19 — Comparaison automatique des schémas SQLite
+  ![Capture du Test 18](Test18/Screenshot%202026-07-16%20145352.png)
 
-- **Objectif** : valider et outiller la méthode de comparaison utilisée tout au long de la campagne, afin de la rendre reproductible et scriptable.
-- **Modification réalisée** : aucune modification fonctionnelle ; il s'agit de mettre en place un script de comparaison automatique entre deux exports `.schema`/`.dump`.
-- **Procédure détaillée** :
-  1. Sélectionner deux états déjà produits lors des tests précédents.
-  2. Écrire un script (shell ou Python) automatisant l'export et le `diff`.
-  3. Valider que le script produit les mêmes résultats que l'analyse manuelle réalisée précédemment.
-- **Ce qu'il faut observer** : cohérence entre le résultat du script et les observations manuelles déjà consignées.
-- **Tables SQLite susceptibles d'être modifiées** : aucune (test d'outillage, non de modification).
-- **Résultat attendu** : un script fiable et réutilisable pour l'ensemble des tests futurs, et pour la phase suivante du projet.
-- **Capture d'écran à réaliser** : capture de la sortie du script de comparaison.
-- **Conclusion à noter** : L'utilisation de notre script `compare_sqlite.py` s'est avérée vitale pour le nettoyage du bruit SQLite et l'interprétation fiable.
+- **Conclusion** : hard delete confirmé — la colonne physique est réellement supprimée (`DROP COLUMN`), avec nettoyage en cascade de `TB_ATTRIBUTE` et `fdo_columns`. Aucun marquage logique (`deleted = 1`) n'est utilisé. Contrairement à la suppression d'une classe entière (Test 17), aucun index ni trigger n'est impacté ici, car ces objets sont rattachés à la classe et non à l'attribut individuel.
 
-### Test 20 — Correspondance entre Infrastructure Administrator et SQLite
 
-- **Objectif** : réaliser une synthèse croisée, classe par classe et concept par concept, entre ce qui est visible dans l'interface d'Infrastructure Administrator et sa traduction exacte en SQLite.
-- **Modification réalisée** : aucune nouvelle modification ; il s'agit d'un test de consolidation reprenant l'ensemble des classes de test créées (Tests 1 à 18).
-- **Procédure détaillée** :
-  1. Parcourir intégralement l'arborescence du Data Model dans Infrastructure Administrator.
-  2. Pour chaque élément rencontré, retrouver sa ligne correspondante en SQLite en s'appuyant sur les identifiants techniques (jamais sur les noms, cf. Test 16).
-  3. Construire un tableau de correspondance final.
-- **Ce qu'il faut observer** : absence d'élément visible dans l'interface sans équivalent SQLite identifié, et inversement, absence de ligne SQLite « métier » non expliquée par un élément visible.
-- **Tables SQLite susceptibles d'être modifiées** : aucune (test de synthèse).
-- **Résultat attendu** : un mapping complet et validé, condition de sortie de la phase 3.
-- **Capture d'écran à réaliser** : capture de synthèse de l'arborescence complète, en vis-à-vis des tables SQLite peuplées.
-- **Conclusion à noter** : Objectif atteint. Les correspondances tables système/physique sont totalement comprises et synthétisées en Section 6.
+
 
 ---
 
 ## 5. Tableau de suivi
 
-Le tableau ci-dessous est destiné à être rempli au fur et à mesure de la réalisation de chaque test. Il constitue la trace de référence pour la construction du mapping final.
-
 | Test | Modification réalisée | Tables modifiées | Colonnes modifiées | Observation | Interprétation | Capture disponible (Oui/Non) |
 |---|---|---|---|---|---|---|
-| 0 | État initial | Aucune | Aucune | Baseline de référence générée | Structure minimale, présence de tables sytème (TB_...) | Oui |
+| 0 | État initial | Aucune | Aucune | Baseline de référence générée | Structure minimale, présence de tables système (TB_...) | Oui |
 | 1 | Ajout d'une classe (TEST_CLASSE_01) | `TB_DICTIONARY`, `TB_ATTRIBUTE`, `fdo_columns` | `TEST_CLASSE_01` (créée) | Création de la table physique et inscription dans les tables systèmes | Mapping 1-1 entre la classe et une table physique. | Oui |
 | 2 | Ajout d'un attribut | `TB_ATTRIBUTE`, `fdo_columns` | `TEST_ATTRIBUT_01` (créée) | Attribut physique créé dans la table `TEST_CLASSE_01` | Chaque attribut est une colonne physique dans la table de sa classe. | Oui |
 | 3 | Ajout d'un attribut (Type numérique) | `TB_ATTRIBUTE`, `fdo_columns` | `TEST_ATTRIBUT_02` (créée) | Création physique (INTEGER(10)) | Respect minutieux du type numérique en SQL. | Oui |
 | 4 | Valeur par défaut | `TB_ATTRIBUTE`, `fdo_columns` | `TEST_ATTRIBUT_03` (créée) | Ajout de l'attribut avec contrainte DEFAULT 0 | Le schéma natif DDL intègre les valeurs par défaut. | Oui |
 | 5 | Attribut obligatoire | `TB_ATTRIBUTE`, `fdo_columns` | `TEST_ATTRIBUT_05` (créée) | Ajout de l'attribut avec contrainte NOT NULL | Les contraintes d'obligation deviennent NOT NULL. | Oui |
-| 6 | Longueur d'un champ | N/A | N/A | Test abandonné (redondance) | La configuration de longueur est déjà vérifiée dans le Test 2 (via `Varchar2(10)`). | Non |
 | 7 | Nouvelle classe géométrique | `TB_DICTIONARY`, `TB_ATTRIBUTE`, `geometry_columns`, `fdo_columns` | `TEST_CLASSE_GEO_01` (créée) | Table créée avec colonnes Z, ORIENTATION, GEOM. `F_CLASS_TYPE` = 'P' | Les tables AutoCAD stockent la géométrie et la lient à `geometry_columns`. | Oui |
 | 8 | Changement du type de géométrie | `TB_DICTIONARY`, `geometry_columns` | `TEST_CLASS_GEO_02` (créée) | `F_CLASS_TYPE` = 'L', `geometry_type` = 2 | Chaque classe fige son type (Ligne = L). | Oui |
-| 9 | Relation entre deux classes | `TB_RELATIONS` | `TEST_ATTRIBUT_09` (créée) | Entrée parent/enfant dans `TB_RELATIONS` et ajout d'un index explicite. | AutoCAD crée manuellement les relations et un index pour les optimiser. | Oui |
-| 10 | Ajout de domaine de valeurs | `TB_DOMAIN`, `TB_RELATIONS` | `TEST_DOMAINE_10_TBD` (créée) | Création d'une table catalogue dédiée et enregistrement dans `TB_DOMAIN`. | Un domaine est matérialisé par sa propre table de valeurs. | Oui |
-| 11 | Modification de domaine | `TEST_DOMAINE_10_TBD` | Aucune | Ligne 'Cuivre' ajoutée à la table de domaine. | Ajout transparent (incrémental) sans impact sur la configuration métier. | Oui |
-| 12 | Héritage entre classes | `TB_DICTIONARY`, `TB_ATTRIBUTE`, `fdo_columns` | `TEST_CLASSE_FILLE_01` (créée) | La table hérite *physiquement* des attributs du parent. | L'héritage d'Autodesk recopie les colonnes parentes dans la table fille SQL. | Oui |
-| 13 | Représentation graphique | N/A | N/A | Test abandonné (Couche de présentation) | L'affichage (couleur/symbole) ne modifie pas le modèle relationnel. | Non |
-| 14 | Ajout d'un Label | N/A | N/A | Test abandonné (Couche de présentation) | Idem, cela indique à l'interface client de Map 3D quoi afficher. | Non |
-| 15 | Ajout d'un Template | N/A | N/A | Test abandonné (Couche de présentation) | Le template est un assistant de saisie de l'UI. | Non |
-| 16 | Renommage d'une classe | `TB_DICTIONARY` | Aucune | Seule `CAPTION` est modifiée | Le nom physique de la table reste inchangé, l'UI modifie un label. | Oui |
-| 17 | Suppression d'une classe | `TB_DICTIONARY`, `TB_ATTRIBUTE`, `TB_RELATIONS` | `TEST_CLASSE_FILLE_01` (supprimée) | Suppression (hard delete) de la table physique et de ses entrées catalogues. | Casse en cascade les objets metadata du système (tables systèmes auto-nettoyées). | Oui |
-| 18 | Suppression d'un attribut | `TB_ATTRIBUTE`, `fdo_columns` | `TEST_ATTRIBUT_01` (supprimée) | Suppression (DROP) physique de la colonne | Vrai suppression sans soft-delete. | Oui |
-| 19 | Comparaison auto | N/A | N/A | Les fichiers `rapport_*.md` générés avec succès | Validation des outils de comparaison. | Oui |
-| 20 | Correspondance IA / SQLite | N/A | N/A | Achevé | Modèle parfaitement mappé pour Postgres. | Oui |
+| 9 | Relation entre deux classes (`TEST_CLASSE_01` ↔ `TEST_CLASSE_GEO_01`) | `TEST_CLASSE_01` (colonne FK), `TB_RELATIONS`, `TB_ATTRIBUTE`, `fdo_columns` | `TEST_ATTRIBUT_09` (créée, FK) | Colonne FK physique ajoutée dans la classe enfant + ligne parent/enfant dans `TB_RELATIONS` + index dédié (`TEST_CLASSE_01_IX1`) créé | Une relation n'est pas qu'une métadonnée : elle matérialise une vraie colonne FK dans la table enfant. Cardinalité (`MERGE_MODE`/`SPLIT_MODE`) non renseignée dans ce test simple. | Oui |
+| 10.1 | Ajout d'un domaine de valeurs (`TEST_DOMAINE_10`) | `TB_DOMAIN`, `TEST_DOMAINE_10_TBD` (nouvelle table) | Aucune (table entière créée) | Table de valeurs dédiée créée (`Acier`, `PVC`, `Fonte`) + entrée catalogue dans `TB_DOMAIN` | Un domaine est matérialisé par sa propre table de valeurs, indépendamment de tout attribut. | Oui |
+| 10.2 | Rattachement d'un attribut au domaine (`TEST_ATTRIBUT_10`) | `TEST_CLASSE_01` (colonne FK), `TB_RELATIONS`, `TB_ATTRIBUTE`, `fdo_columns` | `TEST_ATTRIBUT_10` (créée, FK) | Colonne FK ajoutée + ligne `TB_RELATIONS` où `PARENT_TABLE_NAME` pointe vers la table du domaine + index dédié (`TEST_CLASSE_01_IX2`) | Même mécanisme qu'une relation classe-classe (Test 9) : un domaine est traité comme une "classe parente" dans `TB_RELATIONS`. | Oui |
+| 11 | Modification de domaine (ajout valeur `Cuivre`) | `TEST_DOMAINE_10_TBD` | Aucune | Ligne `Cuivre` ajoutée à la table de domaine ; `TB_DOMAIN` (catalogue) non modifié | Ajout transparent (simple `INSERT` incrémental), aucun impact structurel confirmé. | Oui |
+| 12 | Héritage entre classes (`TEST_CLASSE_FILLE_01` hérite de `TEST_CLASSE_01`) | `TB_DICTIONARY`, `TB_ATTRIBUTE`, `TB_RELATIONS`, `TB_RULE_BASE`, `fdo_columns`, `TEST_CLASSE_01` (ajout `MODEL_NAME`) | `TEST_CLASSE_FILLE_01` (créée, structure complète copiée) | La table fille recopie toutes les colonnes du parent, y compris les relations/domaines hérités (`TB_RELATIONS`) ; lien d'héritage via `TB_DICTIONARY.MODEL_F_CLASS_ID` (pas `PARENT_F_CLASS_ID`) | Héritage physique complet : structure, attributs, relations et règles système sont tous recopiés dans la table fille. | Oui |
+| 16 | Renommage d'une classe (`TEST_CLASSE_01` → `TEST_CLASSE_RENAME`) | `TB_DICTIONARY` | `CAPTION`, `FEATURE_REPRESENTATION` | Nom affiché changé + libellé dynamique généré automatiquement ; `F_CLASS_ID` et `F_CLASS_NAME` (nom physique) inchangés | Le renommage est purement cosmétique côté UI ; l'identifiant technique et le nom physique de la table SQL restent stables. Effet de bord non prévu sur `FEATURE_REPRESENTATION`. | Oui |
+| 17 | Suppression d'une classe (`TEST_CLASSE_FILLE_01`) | `TB_DICTIONARY`, `TB_ATTRIBUTE`, `TB_RELATIONS`, `TB_RULE_BASE`, `fdo_columns` | `TEST_CLASSE_FILLE_01` (table supprimée, + 2 index + 5 triggers) | Hard delete complet et symétrique à la création (Test 12) ; classe parente (`TEST_CLASSE_01`) non affectée | Cascade totale et propre sur tout le catalogue, sans résidu ni clé étrangère orpheline. | Oui |
+| 18 | Suppression d'un attribut (`TEST_ATTRIBUT_01`) | `TEST_CLASSE_01`, `TB_ATTRIBUTE`, `fdo_columns` | `TEST_ATTRIBUT_01` (colonne supprimée) | Colonne physique réellement supprimée (`DROP COLUMN`) + nettoyage catalogue/FDO ; aucun index/trigger impacté | Hard delete confirmé, symétrique à la création (Test 9) ; pas de soft delete (`deleted=1`). | Oui |
 
 > **Remarque**
 > Les tests 6, 13, 14 et 15 ont été volontairement exclus car ils n'impactent pas le Modèle de Données relationnel (voir Section 6.5).
@@ -493,7 +494,7 @@ Une fois l'ensemble des tests réalisés et le tableau de suivi rempli, l'interp
 - **Domaines** → Définis dans `TB_DOMAIN` puis déployés en tant que tables réelles (ex: `TEST_DOMAINE_10_TBD` du Test 10) connectées par clé logique.
 - **Relations** → Les relations parent/enfant utilisent la table `TB_RELATIONS` et déclenchent la création automatique d'un Index pour la clef étrangère cible (Test 9).
 - **Géométries** → Référencées dans `geometry_columns` (qui s'apparente aux tables types de PostGIS). Autodesk sépare les points (`F_CLASS_TYPE = 'P'`, `geometry_type = 1`) des lignes (`geometry_type = 2`).
-- **Héritage** → (Test 12) Déclaré dans `TB_DICTIONARY` (`MODEL_F_CLASS_ID`), et AutoCAD Map **recopie physiquement** tous les champs hérités dans la table fille SQL.
+- **Héritage** → (Test 12) Déclaré dans `TB_DICTIONARY` via `MODEL_F_CLASS_ID`, et AutoCAD Map **recopie physiquement** tous les champs hérités dans la table fille SQL. Cet héritage est complet : il englobe les attributs métier, les relations/domaines et les métadonnées associées, et ne se limite pas à une simple clé étrangère.
 
 ### 6.3 Distinguer les catégories de tables
 
