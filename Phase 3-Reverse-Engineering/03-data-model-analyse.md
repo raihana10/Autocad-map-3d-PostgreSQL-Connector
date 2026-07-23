@@ -40,38 +40,35 @@ Il est essentiel de bien distinguer **deux couches** qui décrivent, chacune à 
 
 ```
 ┌──────────────────────────────────────┐
-│      Infrastructure Administrator      │
-│   (vue conceptuelle / interface UI)    │
-│                                         │
-│   Classe "Vanne"                       │
-│     ├─ Attribut "Diametre" (Double)    │
-│     ├─ Attribut "Materiau" (Domaine)   │
-│     └─ Géométrie (Point)               │
-└──────────────────┬────────────────────┘
-                    │  persistance interne
-                    ▼
+│      Infrastructure Administrator    │
+│   (vue conceptuelle / interface UI)  │
+│                                      │
+│   Classe "Vanne"                     │
+│     ├─ Attribut "Diametre" (Double)  │
+│     ├─ Attribut "Materiau" (Domaine) │
+│     └─ Géométrie (Point)             │
+└──────────────────┬───────────────────┘
+                   │  persistance interne
+                   ▼
 ┌──────────────────────────────────────┐
-│         Fichier SQLite (moteur)        │
-│      (vue physique / relationnelle)    │
-│                                         │
-│  Table CLASSDEFINITION                 │
-│  Table ATTRIBUTEDEFINITION             │
-│  Table DOMAIN                          │
-│  Table GEOMETRYDEFINITION              │
-│  ... (noms indicatifs, à vérifier)     │
+│         Fichier SQLite (moteur)      │
+│      (vue physique / relationnelle)  │
+│                                      │
+│  Table CLASSDEFINITION               │
+│  Table ATTRIBUTEDEFINITION           │
+│  Table DOMAIN                        │
+│  Table GEOMETRYDEFINITION            │
+│  ... (noms indicatifs, à vérifier)   │
 └──────────────────────────────────────┘
 ```
 
 L'objectif de cette phase est de construire, **empiriquement et avec preuves**, la table de correspondance entre ces deux couches.
 
-> **Hypothèse**
-> Le nom exact des tables et colonnes SQLite peut varier selon la version d'Autodesk Infrastructure Administrator utilisée (AutoCAD Map 3D / Autodesk Utility Design / etc.). Les noms mentionnés dans ce document sont **génériques et indicatifs** ; ils devront être confirmés ou corrigés lors de chaque test, colonne « Conclusion à noter ».
-
 ### 1.3 Ce que cette phase doit produire concrètement
 
 À l'issue de cette phase, nous devons disposer de :
 
-- Une cartographie table par table du schéma SQLite du Data Model.
+- Une cartographie du schéma SQLite du Data Model.
 - Une compréhension claire de la manière dont chaque concept métier (classe, attribut, domaine, relation, géométrie, label, template, héritage) est traduit en lignes/colonnes.
 - Un ensemble de captures d'écran et de diffs SQLite servant de preuves reproductibles.
 - Un tableau de suivi rempli, exploitable comme base de spécification pour le développement du convertisseur PostgreSQL/PostGIS.
@@ -91,7 +88,7 @@ La méthodologie retenue est celle du **reverse engineering par différentiel co
 
 **Il ne faut jamais modifier plusieurs paramètres simultanément.**
 
-Cette règle est la pierre angulaire de toute la démarche. Si l'on modifie deux paramètres en même temps (par exemple ajouter un attribut *et* changer son type dans la même opération), il devient impossible de savoir laquelle des deux modifications est responsable de tel ou tel changement observé dans le SQLite. Le diff perd alors toute valeur probante.
+Cette règle est la pierre angulaire de toute la démarche. Si l'on modifie deux paramètres en même temps (par exemple ajouter un attribut *et* changer une de ces propriétés dans la même opération), il devient impossible de savoir laquelle des deux modifications est responsable de tel ou tel changement observé dans le SQLite. Le diff perd alors toute valeur probante.
 
 > **À vérifier**
 > Certaines opérations d'Infrastructure Administrator peuvent déclencher des effets de bord automatiques (par exemple la création implicite d'un index ou d'une contrainte). Il faudra bien distinguer, dans les observations, ce qui relève de la modification volontaire de ce qui relève d'un effet de bord du logiciel.
@@ -101,36 +98,37 @@ Cette règle est la pierre angulaire de toute la démarche. Si l'on modifie deux
 Chaque test suit rigoureusement le cycle suivant :
 
 ```
-   ┌─────────────────────────┐
+   ┌──────────────────────────┐
    │   Modification unique    │
    └────────────┬─────────────┘
-                 ▼
-   ┌─────────────────────────┐
-   │        Sauvegarde         │
+                ▼
+   ┌──────────────────────────┐
+   │        Sauvegarde        │
    └────────────┬─────────────┘
-                 ▼
-   ┌─────────────────────────┐
-   │  Ouverture du SQLite      │
+                ▼
+   ┌──────────────────────────┐
+   │     Extraction des       │
+   │      fichiers .sql       │
    └────────────┬─────────────┘
-                 ▼
-   ┌─────────────────────────┐
-   │       Comparaison         │
-   │  (état N vs état N-1)     │
+                ▼
+┌─────────────────────────────────────┐
+│ Lancement du script de comparaison  │
+│ et generation du rapport de diff    │
+└───────────────┬─────────────────────┘
+                ▼
+   ┌──────────────────────────┐
+   │        Observation       │
    └────────────┬─────────────┘
-                 ▼
-   ┌─────────────────────────┐
-   │        Observation        │
-   └────────────┬─────────────┘
-                 ▼
-   ┌─────────────────────────┐
-   │         Déduction         │
-   └─────────────────────────┘
+                ▼
+   ┌──────────────────────────┐
+   │         Déduction        │
+   └──────────────────────────┘
 ```
 
 1. **Modification unique** : réaliser une seule action précise dans Infrastructure Administrator (ex. : ajout d'un attribut).
 2. **Sauvegarde** : enregistrer le Data Model pour forcer la persistance dans le fichier SQLite sous-jacent.
-3. **Ouverture du SQLite** : ouvrir une copie du fichier avec DB Browser for SQLite (ou équivalent).
-4. **Comparaison** : comparer l'état du schéma/des données avec la copie précédente (avant modification).
+3. **Extraction des fichiers .sql** : extraire les fichiers .sql (schema et dump) du Data Model.
+4. **Lancement du script de comparaison et generation du rapport de diff** : comparer l'état du schéma/des données avec la copie précédente (avant modification).
 5. **Observation** : noter précisément quelles tables, colonnes et valeurs ont changé.
 6. **Déduction** : formuler une hypothèse sur le rôle de chaque table/colonne concernée.
 
@@ -141,15 +139,6 @@ Toutes les observations doivent être consignées dans le **tableau de suivi** (
 > **Observation**
 > Un test qui ne produit aucune modification visible dans le SQLite est tout aussi important qu'un test qui en produit une : il peut indiquer que la donnée est calculée dynamiquement, mise en cache ailleurs, ou stockée dans un fichier annexe non encore identifié.
 
-### 2.5 Conditions de reproductibilité
-
-Pour que chaque test soit exploitable scientifiquement, il convient de respecter les conditions suivantes :
-
-- Travailler sur une **copie de sauvegarde** du Data Model avant toute campagne de tests.
-- Copier le fichier SQLite **avant** et **après** chaque modification, avec un nommage horodaté (ex. `datamodel_test01_avant.sqlite`, `datamodel_test01_apres.sqlite`).
-- Fermer proprement Infrastructure Administrator (ou forcer la sauvegarde) avant toute inspection du SQLite, afin d'éviter les verrous de fichier ou les écritures partielles.
-- Ne jamais inspecter le SQLite pendant qu'Infrastructure Administrator le tient ouvert en écriture.
-
 ---
 
 ## 3. Outils utilisés
@@ -157,13 +146,12 @@ Pour que chaque test soit exploitable scientifiquement, il convient de respecter
 | Outil | Rôle dans la démarche |
 |---|---|
 | **Infrastructure Administrator** | Interface graphique Autodesk permettant de créer, modifier et gérer le Data Model (classes, attributs, domaines, relations, représentations). C'est l'outil qui **génère** les modifications que nous allons observer. |
-| **DB Browser for SQLite** | Outil graphique libre permettant d'ouvrir, parcourir et comparer visuellement le schéma et les données du fichier SQLite. Utilisé pour l'inspection manuelle table par table après chaque test. |
 | **SQL Sheet** | Interface d'exécution de requêtes SQL (intégrée à l'environnement de travail) permettant d'interroger directement le contenu des tables SQLite via des requêtes `SELECT` ciblées, utile pour vérifier rapidement une hypothèse sans naviguer manuellement dans l'interface graphique. |
 | **sqlite3 CLI** | Outil en ligne de commande permettant d'automatiser l'export du schéma (`.schema`), l'export de données (`.dump`), et la production de fichiers texte comparables entre deux états du Data Model. Indispensable pour produire des diffs reproductibles et scriptables. |
-| **Outil diff (comparaison de schémas)** | Outil de comparaison textuelle (par exemple `diff`, `git diff`, ou un outil dédié de comparaison de schémas SQLite) permettant de mettre en évidence automatiquement les différences entre l'export « avant » et l'export « après » d'un test. C'est l'outil qui matérialise concrètement l'étape « Comparaison » du cycle opératoire. |
+| **Script Python de comparaison** | Script Python utilisant sqlite3 permettant de mettre en évidence automatiquement les différences entre l'export « avant » et l'export « après » d'un test. C'est l'outil qui matérialise concrètement l'étape « Comparaison » du cycle opératoire. |
 
 > **Remarque**
-> L'usage combiné de `sqlite3 .schema` (pour le schéma) et `sqlite3 .dump` (pour les données) avant/après chaque test, associé à un `diff` textuel, constitue la méthode la plus fiable et la plus reproductible. DB Browser for SQLite et SQL Sheet servent surtout à l'exploration exploratoire et à la vérification visuelle des hypothèses.
+> L'usage combiné de `sqlite3 .schema` (pour le schéma) et `sqlite3 .dump` (pour les données) avant/après chaque test, associé à un `script de comparaison`, constitue la méthode la plus fiable et la plus reproductible. SQL Sheet sert surtout à l'exploration exploratoire et à la vérification visuelle des hypothèses.
 
 ### 3.1 Procédure type d'extraction pour comparaison
 
@@ -186,96 +174,135 @@ python compare_sqlite.py schema_testN.sql schema_testN1.sql \\
                               dump_testN.sql   dump_testN1.sql \\
                               -o rapport_testN_vs_testN1.md
 ```
-
 ---
 
-## 4. Campagne complète de tests
-
-> **Remarque générale**
-> Chaque test suit systématiquement le même canevas : **Objectif**, **Modification réalisée**, **Procédure détaillée**, **Ce qu'il faut observer**, **Tables SQLite susceptibles d'être modifiées**, **Résultat attendu**, **Capture d'écran à réaliser**, **Conclusion à noter**. Les noms de tables indiqués sont des hypothèses de travail à confirmer test après test.
+## 4. Campagne complète de tests 
 
 ### Test 0 — État initial
 
 - **Objectif** : établir une référence (baseline) avant toute modification, afin de disposer d'un point de comparaison pour tous les tests suivants.
+
 - **Modification réalisée** : aucune. Il s'agit d'un état de référence.
-- **Procédure détaillée** :
-  1. Créer un Data Model vierge ou minimal dans Infrastructure Administrator.
-  2. Sauvegarder.
-  3. Copier le fichier SQLite obtenu sous le nom `datamodel_test00_reference.sqlite`.
-  4. Exporter le schéma complet (`.schema`) et le dump complet (`.dump`).
-- **Ce qu'il faut observer** : la liste complète des tables présentes par défaut, leurs colonnes, leurs types, ainsi que les données déjà présentes (tables système, métadonnées de version, etc.).
-- **Tables SQLite susceptibles d'être modifiées** : toutes (inventaire initial, pas de modification).
-- **Résultat attendu** : un référentiel complet du schéma « à vide », servant de socle de comparaison pour tous les tests suivants.
-- **Capture d'écran à réaliser** : vue d'ensemble de l'arborescence du Data Model dans Infrastructure Administrator ; vue d'ensemble des tables dans DB Browser for SQLite.
-- **Conclusion à noter** : Validé. Présence de nombreuses tables système Autodesk (préfixées par TB_) générées par défaut à l'initialisation.
+
+- **Observation** : la liste complète des tables (170 tables en total , voir *Figure T0-03*) présentes par défaut, leurs colonnes, leurs types, ainsi que les données déjà présentes (tables système, métadonnées de version, etc.).
+
+- **Tables SQLite modifiées** : inventaire initial, pas de modification.
+
+- **Résultat** : un référentiel complet du schéma « à vide », servant de socle de comparaison pour tous les tests suivants.
+
+- **Conclusion** : Présence de nombreuses tables système Autodesk (préfixées par TB_) générées par défaut à l'initialisation.
+
+![](Test0/Figure_1.png)
+*Figure T0-01 -- Arborescence complète du Data Model*
+<br><br>
+![](Test0/Figure_2.png)
+*Figure T0-02 -- La liste des attributs d'une classe*
+<br><br>
+![](Test0/Figure_3.png)
+*Figure T0-03 -- DB Browser for SQLite*
 
 ### Test 1 — Ajout d'une classe
 
 - **Objectif** : identifier la ou les tables responsables du stockage de la définition d'une classe (entité métier) du Data Model.
-- **Modification réalisée** : création d'une nouvelle classe non géométrique, avec un nom simple et identifiable (ex. `TEST_CLASSE_01`).
-- **Procédure détaillée** :
-  1. Dans Infrastructure Administrator, créer une nouvelle classe nommée `TEST_CLASSE_01`, sans attribut additionnel.
-  2. Sauvegarder le Data Model.
-  3. Copier le fichier SQLite résultant.
-  4. Comparer avec l'état du Test 0.
-- **Ce qu'il faut observer** : apparition d'une nouvelle ligne dans une table de type « catalogue de classes » ; valeur du nom de classe ; présence d'un identifiant technique (ID) généré automatiquement.
-- **Tables SQLite susceptibles d'être modifiées** : `CLASSDEFINITION` (ou équivalent), éventuellement une table de métadonnées ou de version incrémentée.
-- **Résultat attendu** : une nouvelle ligne correspondant exactement au nom `TEST_CLASSE_01`, avec un identifiant unique.
-- **Capture d'écran à réaliser** : capture de la classe créée dans l'arborescence Infrastructure Administrator ; capture de la nouvelle ligne dans DB Browser for SQLite.
-- **Conclusion à noter** : `TB_DICTIONARY` est le catalogue maître des classes.
+
+- **Modification réalisée** : création d'une nouvelle classe non géométrique `TEST_CLASSE_01`.
+
+- **Observation** : création immédiate d'une véritable table physique nommée `TEST_CLASSE_01` accompagnée de 5 triggers SQLite automatisant les séquences d'ID (`_AD_FID`, `_AI_FID`, `_AU_FID`, `_BI_FID`, `_BU_FID`). On observe la création d'un identifiant métier (FID) géré en base de données ainsi qu'un impact lourd sur les configurations purement liées à l'interface utilisateur.
+
+- **Tables SQLite modifiées** : au-delà du catalogue principal, les tables réellement appelées sont : `TB_DICTIONARY`*(1 ligne ajoutée)*, `TB_ATTRIBUTE`*(1 ligne)*, `fdo_columns`*(1 ligne)*, `TB_RULE_BASE`*(6 lignes)*, `TB_SEQUENCE_EMULATION`*(4 lignes)*, ainsi que les tables d'interface `TB_GN_DOCUMENT_BAR_ITEM`*(16 lignes)*, `TB_GN_FLYIN_USER`*(2 lignes)*, et `TB_SETTINGS`*(5 lignes).
+
+- **Résultat** : ajout d'exactement 1 ligne métier dans `TB_DICTIONARY` définissant la classe (type et dimension), 1 ligne dans `TB_ATTRIBUTE` et `fdo_columns` pour déclarer la clé primaire `FID`, et 6 lignes de comportements dans `TB_RULE_BASE`. Par ailleurs, 23 pures lignes de formatage visuel sont injectées dans les `TB_GN_*` et `TB_SETTINGS`.
+
+- **Conclusion** : `TB_DICTIONARY` est définitivement le catalogue maître des classes. De plus, la création d'une classe n'est pas qu'une simple ligne de registre : elle implique impérativement la création d'une table SQL réelle en arrière-plan, accompagnée de sa clé primaire `FID` documentée par le noyau FDO (`fdo_columns`).
+
+![](Test1/Screenshot1.png)
+*Figure T1-01 -- Ajout d'une classe*
+<br><br>
+![](Test1/Screenshot2.png)
+*Figure T1-02 -- Formulaire d'ajout*
+<br><br>
+![](Test1/Screenshot3.png)
+*Figure T1-03 -- Emplacement de la classe ajoutée*
 
 ### Test 2 — Ajout d'un attribut
 
 - **Objectif** : identifier la table responsable du stockage des attributs (propriétés) d'une classe.
-- **Modification réalisée** : ajout d'un attribut simple (ex. `TEST_ATTRIBUT_01`, type texte) à la classe créée au Test 1.
-- **Procédure détaillée** :
-  1. Ouvrir `TEST_CLASSE_01`.
-  2. Ajouter un attribut nommé `TEST_ATTRIBUT_01` de type Texte (String), sans autre paramétrage.
-  3. Sauvegarder et comparer avec l'état du Test 1.
-- **Ce qu'il faut observer** : apparition d'une nouvelle ligne liée par clé étrangère à la classe `TEST_CLASSE_01` ; structure du lien classe ↔ attribut.
-- **Tables SQLite susceptibles d'être modifiées** : `ATTRIBUTEDEFINITION` (ou équivalent), table de liaison classe-attribut si elle existe séparément.
-- **Résultat attendu** : une ligne d'attribut référençant l'identifiant de `TEST_CLASSE_01` via une clé étrangère.
-- **Capture d'écran à réaliser** : capture de l'attribut dans Infrastructure Administrator ; capture de la ligne correspondante en SQLite avec la clé étrangère mise en évidence.
-- **Conclusion à noter** : `TB_ATTRIBUTE` est le catalogue des attributs. Une colonne physique est directement créée dans le DDL de la table parente.
 
-### Test 3 — Modification du type d'un attribut
+- **Modification réalisée** : ajout d'un attribut `TEST_ATTRIBUT_01`, type texte à la classe créée au Test 1 avec longueure max 10.
+
+- **Observation** : modification directe de la structure SQL (DDL) de la table physique parente avec l'apparition d'une nouvelle colonne dimensionnée. La création de cet attribut s'accompagne de l'enregistrement de l'attribut dans des dictionnaires systèmes et d'une incrémentation de certaines séquences internes et tables d'interface.
+
+- **Tables SQLite modifiées** : exécution d'un `ALTER TABLE` sur la table métier `TEST_CLASSE_01`. Les tables système impactées sont : `TB_ATTRIBUTE`*(1 ligne ajoutée)*, `fdo_columns`*(1 ligne ajoutée)*, `TB_SEQUENCE_EMULATION`*(1 ligne modifiée)*, et `TB_GN_FLYIN_USER`*(1 ligne modifiée)*.
+
+- **Résultat** : ajout physique de la colonne `TEST_ATTRIBUT_01 (VARCHAR2(10))` à la table `TEST_CLASSE_01`. Ajout d'une ligne dans `TB_ATTRIBUTE` rattachant l'attribut à l'ID de sa classe mère (`F_CLASS_ID=8`). Ajout d'une ligne dans `fdo_columns` renseignant en dur les contraintes de type issues de l'interface (type texte = `fdo_data_type: 9`, longueur = `fdo_data_length: 10`).
+
+- **Conclusion** : `TB_ATTRIBUTE` est le catalogue maître des définitions d'attributs. L'ajout d'une propriété dans Infrastructure Administrator se traduit toujours par la création physique immédiate d'une colonne dans la table SQL parente, accompagnée de l'enregistrement de son type exact et de limitations (longueur) dans la table système `fdo_columns`.
+
+![](Test2/Screenshot1.png)
+*Figure T2-01 -- Formulaire d'ajout d'un attribut*
+<br><br>
+![](Test2/Screenshot2.png)
+*Figure T2-02 -- Emplacement de l'attribut ajouté*
+<br><br>
+
+### Test 3 — Comparaison de deux attributs de types différents
 
 - **Objectif** : identifier comment le type de données d'un attribut est encodé (chaîne littérale, code numérique, table de référence des types).
-- **Modification réalisée** : changer le type de `TEST_ATTRIBUT_01` de Texte vers Double (nombre décimal).
-- **Procédure détaillée** :
-  1. Modifier uniquement le type de l'attribut existant.
-  2. Sauvegarder et comparer avec l'état du Test 2.
-- **Ce qu'il faut observer** : la ou les colonnes dont la valeur change dans la ligne de l'attribut ; s'il s'agit d'un code numérique, rechercher une éventuelle table de référence des types de données.
-- **Tables SQLite susceptibles d'être modifiées** : `ATTRIBUTEDEFINITION` (colonne type), éventuellement `DATATYPE` ou équivalent.
-- **Résultat attendu** : la colonne type de l'attribut change de valeur ; aucune nouvelle ligne créée ailleurs si le type est un code fixe déjà existant.
-- **Capture d'écran à réaliser** : capture avant/après du type dans Infrastructure Administrator ; capture du diff SQLite sur la ligne concernée.
-- **Conclusion à noter** : Le type est défini directement en dur dans le DDL physique (ex: INTEGER(10)) et tracé via un code interne dans `fdo_columns`.
+
+- **Modification réalisée** : ajout d'un nouvel attribut `TEST_ATTRIBUT_02` de type numérique (Nombre) avec une précision de 10.
+
+- **Observation** : l'ajout d'un attribut d'un autre type génère un comportement identique à celui observé au test précédent (altération immédiate du schéma SQL de la classe parente), mais l'encodage des métadonnées du type diffère spécifiquement au sein de la table de formatage `fdo_columns`. 
+
+- **Tables SQLite modifiées** : exécution d'un `ALTER TABLE` sur la table métier `TEST_CLASSE_01`. Les tables système impactées sont : `TB_ATTRIBUTE`*(1 ligne ajoutée)*, `fdo_columns`*(1 ligne ajoutée)*, et `TB_SEQUENCE_EMULATION`*(1 ligne modifiée)*. Notons l'absence formelle de table métier spécifiquement dédiée au stockage des types.
+
+- **Résultat** : ajout physique de la colonne `TEST_ATTRIBUT_02 (INTEGER(10))` à la table `TEST_CLASSE_01`. Modification de l'incrément `TB_ATTRIBUTE_S` et création de l'enregistrement de l'attribut mère dans `TB_ATTRIBUTE`. Contrairement à l'attribut texte (Test 2), la métadonnée renseignée dans `fdo_columns` encode le type Integer via `fdo_data_type: 7`, `f_column_desc: 'Number'`, et l'emplacement mémoire via `fdo_data_precision: 10`.
+
+- **Conclusion** : le type n'est pas stocké dans une table de référence isolée, il est directement formalisé en SQL pur dans le DDL de la table parente (ex: `INTEGER(10)`). Son typage logique complet est géré et vérifié au moyen d'un code de type FDO natif (type 7 pour Number, contre 9 pour Varchar2) figurant dans la ligne descriptive propre à l'attribut au sein de `fdo_columns`.
+
+![](Test3/Screenshot1.png)
+*Figure T3-01 -- Apperçu de l'attribut TEST_ATTRIBUT_02*
+<br><br>
 
 ### Test 4 — Valeur par défaut
 
 - **Objectif** : localiser le stockage d'une valeur par défaut associée à un attribut.
-- **Modification réalisée** : définir une valeur par défaut (ex. `0` ou `"N/A"`) sur `TEST_ATTRIBUT_01`.
-- **Procédure détaillée** :
-  1. Définir la valeur par défaut sur l'attribut.
-  2. Sauvegarder et comparer avec l'état du Test 3.
-- **Ce qu'il faut observer** : apparition ou mise à jour d'une colonne dédiée dans la table des attributs (ou table annexe).
-- **Tables SQLite susceptibles d'être modifiées** : `ATTRIBUTEDEFINITION` (colonne valeur par défaut).
-- **Résultat attendu** : une colonne contenant exactement la valeur saisie.
-- **Capture d'écran à réaliser** : capture du champ valeur par défaut dans Infrastructure Administrator ; capture de la colonne correspondante en SQLite.
-- **Conclusion à noter** : Appliqué au niveau SQL par une simple instruction DEFAULT.
+
+- **Modification réalisée** : définir une valeur par défaut (`0`) sur un nouvel attribut `TEST_ATTRIBUT_03`.
+
+- **Observation** : l'intégration d'une valeur par défaut ne crée pas de table additionnelle ni de colonne spécifique dans un catalogue de métadonnées de valeur par défaut. La contrainte est directement retranscrite au niveau du schéma SQL de création de la table.
+
+
+- **Tables SQLite modifiées** : exécution d'un `ALTER TABLE` sur la table métier `TEST_CLASSE_01`. Côté système, on observe l'ajout d'une ligne d'attribut classique dans `TB_ATTRIBUTE` et `fdo_columns`, ainsi que l'incrémentation de la séquence dans `TB_SEQUENCE_EMULATION`.
+
+- **Résultat** : l'attribut physique créé dans la table `TEST_CLASSE_01` inclut explicitement la contrainte DDL de la valeur par défaut : `TEST_ATTRIBUT_03 (INTEGER(10), DEFAULT 0)`. Dans `TB_ATTRIBUTE` et `fdo_columns`, l'apparition est standard et ne mentionne pas cette contrainte `DEFAULT 0`.
+
+- **Conclusion** : le système Autodesk Infrastructure Administrator se repose de manière totalement native sur les fonctionnalités du moteur de base de données (ici SQLite) pour imposer les valeurs par défaut. Il l'ajoute directement sous forme d'instruction SQL `DEFAULT` sur la colonne physique, aucune métadonnée complexe n'est stockée à ce sujet.
+
+![](Test4/Screenshot1.png)
+*Figure T4-01 -- Formulaire d'ajout d'un attribut*
+<br><br>
+![](Test4/Screenshot2.png)
+*Figure T4-02 -- Aperçu de l'attribut TEST_ATTRIBUT_01*
+<br><br>
 
 ### Test 5 — Attribut obligatoire
 
-- **Objectif** : localiser le stockage de la contrainte « obligatoire » (Required / Mandatory) sur un attribut.
-- **Modification réalisée** : cocher l'option « obligatoire » sur `TEST_ATTRIBUT_01`.
-- **Procédure détaillée** :
-  1. Activer l'option obligatoire.
-  2. Sauvegarder et comparer avec l'état du Test 4.
-- **Ce qu'il faut observer** : changement d'une colonne booléenne (probablement 0/1) dans la table des attributs.
-- **Tables SQLite susceptibles d'être modifiées** : `ATTRIBUTEDEFINITION` (colonne booléenne « required »/« mandatory »/« nullable »).
-- **Résultat attendu** : une colonne booléenne passant de 0 à 1 (ou inversement selon la convention).
-- **Capture d'écran à réaliser** : capture de la case à cocher dans Infrastructure Administrator ; capture du diff sur la colonne booléenne.
-- **Conclusion à noter** : Appliqué physiquement au niveau SQL avec la contrainte NOT NULL.
+- **Objectif** : localiser le stockage de la contrainte « obligatoire » sur un attribut.
+
+- **Modification réalisée** : cocher l'option « obligatoire » lors de la création d'un nouvel attribut `TEST_ATTRIBUT_05`.
+
+- **Observation** : au contraire d'un stockage dans une colonne booléenne dédiée aux métadonnées, la contrainte stricte (obligatoire) est directement reconvertie et appliquée sur le schéma SQL physique de la table.
+
+- **Tables SQLite modifiées** : exécution d'un `ALTER TABLE` sur la table métier `TEST_CLASSE_01`. Les tables système impactées habituelles sont `TB_ATTRIBUTE`*(1 ligne ajoutée)*, `fdo_columns`*(1 ligne ajoutée)*, et `TB_SEQUENCE_EMULATION`*(1 ligne modifiée)*.
+
+- **Résultat** : ajout physique de la colonne `TEST_ATTRIBUT_05 (VARCHAR2(10), NOT NULL)` à la table `TEST_CLASSE_01`. Les insertions dans `TB_ATTRIBUTE` et `fdo_columns` sont identiques à n'importe quel autre attribut et ne stockent aucun booléen distinctif supplémentaire pour exprimer l'obligation.
+
+
+- **Conclusion** : Autodesk s'appuie une fois de plus nativement sur le moteur SQL : la contrainte d'obligation se traduit strictement par la clause DDL `NOT NULL` de la base de données. Aucune métadonnée logicielle cachée côté FDO ou `TB_ATTRIBUTE` n'a été recensée pour statuer sur cette obligation.
+
+![](Test5/Screenshot1.png)
+*Figure T5-01 -- Aperçu de l'attribut TEST_ATTRIBUT_01*
+<br><br>
 
 ### Test 6 — Longueur d'un champ
 
@@ -286,28 +313,34 @@ python compare_sqlite.py schema_testN.sql schema_testN1.sql \\
 ### Test 7 — Nouvelle classe géométrique
 
 - **Objectif** : identifier les différences structurelles entre une classe non géométrique et une classe géométrique (feature class).
-- **Modification réalisée** : créer une nouvelle classe géométrique (ex. `TEST_CLASSE_GEO_01`) de type Point.
-- **Procédure détaillée** :
-  1. Créer la classe en précisant qu'elle possède une géométrie.
-  2. Sauvegarder et comparer avec un état sans cette classe.
-- **Ce qu'il faut observer** : lignes supplémentaires par rapport au Test 1 (classe simple), notamment dans une table dédiée à la géométrie.
-- **Tables SQLite susceptibles d'être modifiées** : `CLASSDEFINITION`, `GEOMETRYDEFINITION` (ou équivalent), éventuellement une table de liaison classe-géométrie.
-- **Résultat attendu** : une ligne classe classique **plus** une ligne dans une table géométrique référençant cette classe.
-- **Capture d'écran à réaliser** : capture de la classe géométrique créée ; capture des deux tables SQLite concernées.
-- **Conclusion à noter** : Enregistrement dans `geometry_columns` (standard SIG) et type de classe `P` (Point) dans `TB_DICTIONARY`.
 
-### Test 8 — Changement du type de géométrie
+- **Modification réalisée** : créer une nouvelle classe géométrique `TEST_CLASSE_GEO_01` de type Point.
 
-- **Objectif** : localiser le stockage du type de géométrie (Point, Ligne, Polygone).
-- **Modification réalisée** : changer le type de géométrie de `TEST_CLASSE_GEO_01` de Point vers Ligne (Polyline).
-- **Procédure détaillée** :
-  1. Modifier uniquement le type géométrique.
-  2. Sauvegarder et comparer avec l'état du Test 7.
-- **Ce qu'il faut observer** : changement d'une valeur (code numérique ou texte) dans la table géométrique identifiée au Test 7.
-- **Tables SQLite susceptibles d'être modifiées** : `GEOMETRYDEFINITION` (colonne type de géométrie).
-- **Résultat attendu** : la colonne type géométrie passe d'une valeur « Point » à une valeur « Ligne » (ou codes numériques correspondants).
-- **Capture d'écran à réaliser** : capture avant/après dans Infrastructure Administrator ; capture du diff SQLite.
-- **Conclusion à noter** : Identifiant de type de classe devient `L` (Ligne) et `geometry_type` vaut 2 dans `geometry_columns`.
+- **Observation** : une classe géométrique nécessite une configuration beaucoup plus lourde qu'une classe standard. En plus du mécanisme habituel de création de table, Autodesk génère automatiquement un jeu de métadonnées spatiales et injecte de nouveaux attributs purement techniques (comme l'élévation, la qualité visuelle ou encore la colonne `GEOM`).
+
+- **Tables SQLite modifiées** : la table `TEST_CLASSE_GEO_01` est créée accompagnée de ses 5 triggers habituels. Côté catalogues, les tables impactées sont : `geometry_columns` *(1 ligne ajoutée)*, `TB_DICTIONARY` *(1 ligne ajoutée)*, `TB_ATTRIBUTE` *(5 lignes ajoutées)*, `fdo_columns` *(4 lignes ajoutées)*, `TB_RULE_BASE` *(7 lignes ajoutées)*, et `TB_SETTINGS` *(3 lignes ajoutées)*.
+
+- **Résultat** : la grande différence réside dans l'apparition de l'information géométrique dans la table standard OGC SQLite `geometry_columns`, y déclarant la colonne physique `GEOM` avec un `geometry_type` à 1 (Point). Par ailleurs, `TB_DICTIONARY` enregistre le flag `F_CLASS_TYPE: P` (Point). Contrairement à une table standard qui ne contenait que l'attribut système `FID`, ici la table physique hérite aussi automatiquement de colonnes spatiales tierces (Z, ORIENTATION, QUALITY, GEOM) documentées dans `TB_ATTRIBUTE` et typées dans `fdo_columns`.
+
+- **Conclusion** : Autodesk Map respecte l'implémentation standard des SIG : l'information spatiale est bien gérée par la table index `geometry_columns`. Les spécificités des points (comme l'élévation ou l'orientation du bloc de point) sont créées en SQL dur dans la classe parente dès son initialisation.
+
+![](Test7/Screenshot1.png)
+*Figure T7-01 -- Aperçu de la classe géométrique créée*
+<br><br>
+
+### Test 8 — Création d'une classe géométrique de type Ligne
+
+- **Objectif** : localiser le stockage du type de géométrie (Point, Ligne, Polygone) et identifier les attributs automatiques associés aux entités linéaires.
+
+- **Modification réalisée** : création d'une nouvelle classe géométrique `TEST_CLASS_GEO_02` de type Ligne (Polyline).
+
+- **Observation** : la création d'une classe linéaire se traduit par la déclaration d'un type géométrique spécifique dans les index spatiaux et par l'injection automatique d'attributs de mesure dédiés aux lignes (tels que la longueur `LENGTH`), contrairement aux classes de points qui injectaient des attributs d'orientation et d'élévation.
+
+- **Tables SQLite modifiées** : création de la table physique `TEST_CLASS_GEO_02` accompagnée de ses 5 triggers SQLite (`_AD_FID`, `_AI_FID`, `_AU_FID`, `_BI_FID`, `_BU_FID`). Les tables catalogues impactées sont : `geometry_columns` *(1 ligne ajoutée)*, `TB_DICTIONARY` *(1 ligne ajoutée)*, `TB_ATTRIBUTE` *(3 lignes ajoutées)*, `fdo_columns` *(2 lignes ajoutées)*, `TB_RULE_BASE` *(11 lignes ajoutées)*, et `TB_SEQUENCE_EMULATION` *(3 lignes modifiées)*.
+
+- **Résultat** : dans `TB_DICTIONARY`, la classe est enregistrée avec le type `F_CLASS_TYPE: L` (Ligne). Dans la table standard `geometry_columns`, la colonne `GEOM` est enregistrée avec un `geometry_type` égal à 2 (LineString / Polyline). Au niveau des attributs, au lieu de `Z`/`ORIENTATION`/`QUALITY`, la table système `TB_ATTRIBUTE` et la table `fdo_columns` enregistrent l'attribut calculé `LENGTH` (`fdo_data_type: 3`, précision 20, échelle 8).
+
+- **Conclusion** : Autodesk distingue clairement les types géométriques via deux indicateurs : le code littéral `F_CLASS_TYPE` ('L' pour Ligne, 'P' pour Point) dans `TB_DICTIONARY` et le code numérique standard OGC `geometry_type` (2 pour Ligne, 1 pour Point) dans `geometry_columns`. De plus, chaque type de géométrie génère son propre sous-ensemble d'attributs métier automatiques (`LENGTH` pour les lignes).
 
 ### Test 9 — Ajout d'une relation entre deux classes
 
