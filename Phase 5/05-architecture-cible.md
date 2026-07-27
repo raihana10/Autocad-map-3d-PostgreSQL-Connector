@@ -19,11 +19,10 @@ La solution doit répondre à deux exigences :
 | Approche | Description | Statut | Justification |
 |---|---|---|---|
 | **A. Génération de scripts SQL (Python)** | Lecture du Data Model SQLite et génération automatique du DDL PostGIS. | **Retenue (Étape 1)** | Génère de façon exacte et contrôlée la structure relationnelle et spatiale. |
-| **B. Conversion XML → PostgreSQL** | Conversion d'un export XML du Data Model. | **Éliminée** | Non conforme aux résultats de la Phase 3 : le Data Model est stocké en SQLite, pas en XML. |
-| **C. Synchronisation périodique ETL** | Script de synchronisation par lots à intervalles réguliers. | **Éliminée** | Ne permet pas l'édition en temps réel exigée lors de la saisie cartographique. |
-| **D. Plugin C# / .NET (API Map 3D)** | Développement d'une extension cliente native dans Map 3D. | **Éliminée** | Complexité et courbe d'apprentissage trop élevées pour le périmètre temporel d'un PFA. |
-| **E. Plugin Java** | Application cliente en Java. | **Éliminée** | L'écosystème Autodesk est orienté .NET ; aucune API Java officielle n'existe pour Map 3D. |
-| **F. Connecteur FDO PostgreSQL Natif** | Utilisation du provider FDO PostgreSQL natif d'AutoCAD Map 3D. | **Retenue (Étape 2)** | Réutilise le moteur d'accès natif et officiel d'Autodesk pour l'édition temps réel. |
+| **B. Synchronisation périodique ETL** | Script de synchronisation par lots à intervalles réguliers. | **Éliminée** | Ne permet pas l'édition en temps réel exigée lors de la saisie cartographique. |
+| **C. Plugin C# / .NET (API Map 3D)** | Développement d'une extension cliente native dans Map 3D. | **Éliminée** | Complexité et courbe d'apprentissage trop élevées pour le périmètre temporel d'un PFA. |
+| **D. Plugin Java** | Application cliente en Java. | **Éliminée** | L'écosystème Autodesk est orienté .NET ; aucune API Java officielle n'existe pour Map 3D. |
+| **E. Connecteur FDO PostgreSQL Natif** | Utilisation du provider FDO PostgreSQL natif d'AutoCAD Map 3D. | **Retenue (Étape 2)** | Réutilise le moteur d'accès natif et officiel d'Autodesk pour l'édition temps réel. |
 
 ---
 
