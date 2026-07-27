@@ -19,17 +19,16 @@ La solution doit répondre à deux exigences :
 | Approche | Description | Statut | Justification |
 |---|---|---|---|
 | **A. Génération de scripts SQL (Python)** | Lecture du Data Model SQLite et génération automatique du DDL PostGIS. | **Retenue (Étape 1)** | Génère de façon exacte et contrôlée la structure relationnelle et spatiale. |
-| **B. Conversion XML → PostgreSQL** | Conversion d'un export XML du Data Model. | **Éliminée** | Non conforme aux résultats de la Phase 3 : le Data Model est stocké en SQLite, pas en XML. |
-| **C. Synchronisation périodique ETL** | Script de synchronisation par lots à intervalles réguliers. | **Éliminée** | Ne permet pas l'édition en temps réel exigée lors de la saisie cartographique. |
-| **D. Plugin C# / .NET (API Map 3D)** | Développement d'une extension cliente native dans Map 3D. | **Éliminée** | Complexité et courbe d'apprentissage trop élevées pour le périmètre temporel d'un PFA. |
-| **E. Plugin Java** | Application cliente en Java. | **Éliminée** | L'écosystème Autodesk est orienté .NET ; aucune API Java officielle n'existe pour Map 3D. |
-| **F. Connecteur FDO PostgreSQL Natif** | Utilisation du provider FDO PostgreSQL natif d'AutoCAD Map 3D. | **Retenue (Étape 2)** | Réutilise le moteur d'accès natif et officiel d'Autodesk pour l'édition temps réel. |
+| **B. Synchronisation périodique ETL** | Script de synchronisation par lots à intervalles réguliers. | **Éliminée** | Ne permet pas l'édition en temps réel exigée lors de la saisie cartographique. |
+| **C. Plugin C# / .NET (API Map 3D)** | Développement d'une extension cliente native dans Map 3D. | **Éliminée** | Complexité et courbe d'apprentissage trop élevées pour le périmètre temporel d'un PFA. |
+| **D. Plugin Java** | Application cliente en Java. | **Éliminée** | L'écosystème Autodesk est orienté .NET ; aucune API Java officielle n'existe pour Map 3D. |
+| **E. Connecteur FDO PostgreSQL Natif** | Utilisation du provider FDO PostgreSQL natif d'AutoCAD Map 3D. | **Retenue (Étape 2)** | Réutilise le moteur d'accès natif et officiel d'Autodesk pour l'édition temps réel. |
 
 ---
 
-## 3. Architecture retenue : Combinaison A + F (Génération + Connexion FDO)
+## 3. Architecture retenue : Combinaison A + E (Génération + Connexion FDO)
 
-La solution retenue combine l'**Approche A** et l'**Approche F** pour offrir une chaîne complète, robuste et dynamique :
+La solution retenue combine l'**Approche A** et l'**Approche E** pour offrir une chaîne complète, robuste et dynamique :
 
 ```
 ┌─────────────────────────────────────────────────────────┐
@@ -53,9 +52,9 @@ La solution retenue combine l'**Approche A** et l'**Approche F** pour offrir une
 └─────────────────────────────────────────────────────────┘
 ```
 
-### Fonctionnement du duo A + F :
+### Fonctionnement du duo A + E :
 * **Approche A (Génération initiale)** : Un script Python lit la structure du Data Model SQLite et génère le fichier `schema_postgres.sql`. Cette étape prépare le réceptacle dans PostgreSQL (tables, types FDO, géométries PostGIS, contraintes et index spatiaux GIST).
-* **Approche F (Exploitation dynamique)** : AutoCAD Map 3D se connecte à la base PostgreSQL via son connecteur **FDO PostgreSQL natif**. Chaque ajout, modification ou suppression effectué par le dessinateur dans Map 3D est répercuté **en temps réel (Live Read/Write)** dans PostgreSQL.
+* **Approche E (Exploitation dynamique)** : AutoCAD Map 3D se connecte à la base PostgreSQL via son connecteur **FDO PostgreSQL natif**. Chaque ajout, modification ou suppression effectué par le dessinateur dans Map 3D est répercuté **en temps réel (Live Read/Write)** dans PostgreSQL.
 
 ---
 
