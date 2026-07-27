@@ -26,9 +26,9 @@ La solution doit répondre à deux exigences :
 
 ---
 
-## 3. Architecture retenue : Combinaison A + F (Génération + Connexion FDO)
+## 3. Architecture retenue : Combinaison A + E (Génération + Connexion FDO)
 
-La solution retenue combine l'**Approche A** et l'**Approche F** pour offrir une chaîne complète, robuste et dynamique :
+La solution retenue combine l'**Approche A** et l'**Approche E** pour offrir une chaîne complète, robuste et dynamique :
 
 ```
 ┌─────────────────────────────────────────────────────────┐
@@ -52,9 +52,9 @@ La solution retenue combine l'**Approche A** et l'**Approche F** pour offrir une
 └─────────────────────────────────────────────────────────┘
 ```
 
-### Fonctionnement du duo A + F :
+### Fonctionnement du duo A + E :
 * **Approche A (Génération initiale)** : Un script Python lit la structure du Data Model SQLite et génère le fichier `schema_postgres.sql`. Cette étape prépare le réceptacle dans PostgreSQL (tables, types FDO, géométries PostGIS, contraintes et index spatiaux GIST).
-* **Approche F (Exploitation dynamique)** : AutoCAD Map 3D se connecte à la base PostgreSQL via son connecteur **FDO PostgreSQL natif**. Chaque ajout, modification ou suppression effectué par le dessinateur dans Map 3D est répercuté **en temps réel (Live Read/Write)** dans PostgreSQL.
+* **Approche E (Exploitation dynamique)** : AutoCAD Map 3D se connecte à la base PostgreSQL via son connecteur **FDO PostgreSQL natif**. Chaque ajout, modification ou suppression effectué par le dessinateur dans Map 3D est répercuté **en temps réel (Live Read/Write)** dans PostgreSQL.
 
 ---
 
