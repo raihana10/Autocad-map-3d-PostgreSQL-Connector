@@ -4,7 +4,7 @@
 
 > Phase 2 du plan de travail. Le volet Autodesk (Infrastructure Administrator, choix du modèle d'Industry Model, menu Enterprise) est déjà couvert dans le livrable **`01-autodesk-architecture.md`** et n'est pas répété ici.
 >
-> Légende : **[FAIT]** = réalisé et capturé · **[À FAIRE]** = prévu mais pas encore fait.
+
 
 Définitions :
 - **PostgreSQL** : système de gestion de bases de données relationnelles open source, robuste et extensible, utilisé pour stocker et gérer des données structurées.
