@@ -9,8 +9,8 @@
 L'objectif de la Phase 5 est de définir l'architecture technique permettant d'exploiter un **Data Model Autodesk Infrastructure Administrator** avec une base de données **PostgreSQL / PostGIS**, sans dépendre d'Oracle, SQL Server ni du connecteur propriétaire payant TKI PGP.
 
 La solution doit répondre à deux exigences :
-1. **Génération du schéma DDL** : Traduire fidèlement la structure du Data Model SQLite vers PostgreSQL/PostGIS.
-2. **Exploitation temps réel** : Permettre à AutoCAD Map 3D d'interagir (lecture et écriture) avec la base PostgreSQL.
+1. **Génération du schéma DDL** : Traduire fidèlement la structure du Data Model SQLite (classes, attributs, domaines, relations, héritage) vers PostgreSQL/PostGIS.
+2. **Exploitation temps réel** : Permettre à AutoCAD Map 3D d'interagir (lecture et écriture) avec la base PostgreSQL avec un niveau de fonctionnalité équivalent à TKI PGP.
 
 ---
 
@@ -18,7 +18,7 @@ La solution doit répondre à deux exigences :
 
 | Approche | Description | Statut | Justification |
 |---|---|---|---|
-| **A. Génération de scripts SQL (Python)** | Lecture du Data Model SQLite et génération automatique du DDL PostGIS. | **Retenue (Étape 1)** | Génère de façon exacte et contrôlée la structure relationnelle et spatiale. |
+| **A. Génération de scripts SQL (Python)** | Lecture du Data Model SQLite et génération automatique du DDL PostGIS. | **Retenue (Étape 1)** | Génère de façon exacte et contrôlée la structure relationnelle, spatiale et les contraintes. |
 | **B. Synchronisation périodique ETL** | Script de synchronisation par lots à intervalles réguliers. | **Éliminée** | Ne permet pas l'édition en temps réel exigée lors de la saisie cartographique. |
 | **C. Plugin C# / .NET (API Map 3D)** | Développement d'une extension cliente native dans Map 3D. | **Éliminée** | Complexité et courbe d'apprentissage trop élevées pour le périmètre temporel d'un PFA. |
 | **D. Plugin Java** | Application cliente en Java. | **Éliminée** | L'écosystème Autodesk est orienté .NET ; aucune API Java officielle n'existe pour Map 3D. |
@@ -26,9 +26,9 @@ La solution doit répondre à deux exigences :
 
 ---
 
-## 3. Architecture retenue : Combinaison A + E (Génération + Connexion FDO)
+## 3. Architecture retenue : Combinaison A + E (Génération + Connexion FDO + Triggers)
 
-La solution retenue combine l'**Approche A** et l'**Approche E** pour offrir une chaîne complète, robuste et dynamique :
+La solution retenue combine l'**Approche A** et l'**Approche E** complétée par l'intelligence métier sous PostgreSQL :
 
 ```
 ┌─────────────────────────────────────────────────────────┐
@@ -37,13 +37,17 @@ La solution retenue combine l'**Approche A** et l'**Approche E** pour offrir une
                              │
                              │ [Approche A]
                              │ Script Python spécialisé
-                             │ (Lecture des métadonnées)
+                             │ (Lecture des 6 catalogues de métadonnées)
                              ▼
 ┌─────────────────────────────────────────────────────────┐
 │        2. Base PostgreSQL / PostGIS (Schéma DDL)        │
+│    - Tables Métiers & Géométries PostGIS                │
+│    - Tables & Clés Étrangères de Domaines (_TBD)        │
+│    - Relations Parent-Enfant (TB_RELATIONS)             │
+│    - Triggers PL/pgSQL (Calculs & Contrôles Métiers)    │
 └────────────────────────────▲────────────────────────────┘
                              │
-                             │ [Approche F]
+                             │ [Approche E]
                              │ Connecteur FDO Natif PostgreSQL
                              │ (Édition & Lecture temps réel)
                              ▼
@@ -52,33 +56,50 @@ La solution retenue combine l'**Approche A** et l'**Approche E** pour offrir une
 └─────────────────────────────────────────────────────────┘
 ```
 
-### Fonctionnement du duo A + E :
-* **Approche A (Génération initiale)** : Un script Python lit la structure du Data Model SQLite et génère le fichier `schema_postgres.sql`. Cette étape prépare le réceptacle dans PostgreSQL (tables, types FDO, géométries PostGIS, contraintes et index spatiaux GIST).
-* **Approche E (Exploitation dynamique)** : AutoCAD Map 3D se connecte à la base PostgreSQL via son connecteur **FDO PostgreSQL natif**. Chaque ajout, modification ou suppression effectué par le dessinateur dans Map 3D est répercuté **en temps réel (Live Read/Write)** dans PostgreSQL.
-
 ---
 
 ## 4. Spécificité du moteur de conversion (Approche A)
 
-### Pourquoi filtrer sur 4 tables clés et ne pas tout convertir ?
+### Les 6 catalogues maîtres identifiés en Phase 3
+
 Le fichier SQLite d'origine contient environ 170 tables, dont plus de 150 sont des tables d'interface utilisateur ou de configuration système d'AutoCAD (`TB_GN_*`, `TB_SETTINGS`, `TB_SEQUENCE_EMULATION`).
 
-Le script Python de l'Approche A cible exclusivement les **4 catalogues maîtres de métadonnées** identifiés en Phase 3 :
+Pour couvrir l'intégralité des fonctionnalités d'un Industry Model et égaler TKI PGP, notre script Python cible les **6 catalogues maîtres de métadonnées** validés lors des tests de la Phase 3 :
 
-1. **`TB_DICTIONARY`** : Liste uniquement les vraies entités métier (`F_CLASS_NAME`) et leur type d'objet (`F_CLASS_TYPE` : Point, LineString, Polygon, ou Table d'attributs).
-2. **`TB_ATTRIBUTE`** : Isole les attributs métier définis par l'utilisateur pour chaque classe.
-3. **`fdo_columns`** : Restitue le **typage logique FDO réel** (`fdo_data_type` : Varchar, Number, Double, Boolean) et sa précision (`fdo_data_length`), bien plus précis que le type générique SQLite.
-4. **`geometry_columns`** : Fournit le nom de la colonne spatiale (`GEOM`) et le type de géométrie OGC standard.
+1. **`TB_DICTIONARY`** : Liste les entités métier (`F_CLASS_NAME`), leur type d'objet (`F_CLASS_TYPE` : Point, LineString, Polygon, Table) et gère l'héritage de classes (`MODEL_F_CLASS_ID`, validé au Test 12).
+2. **`TB_ATTRIBUTE`** : Isole les attributs métier définis pour chaque classe (validé aux Tests 2, 3, 4, 5).
+3. **`fdo_columns`** : Restitue le **typage logique FDO réel** (`fdo_data_type` : Varchar, Number, Double, Boolean) et sa précision (`fdo_data_length`).
+4. **`geometry_columns`** : Fournit la colonne spatiale (`GEOM`) et le type de géométrie OGC standard (validé aux Tests 7, 8).
+5. **`TB_DOMAIN` + Tables `<DOMAIN>_TBD`** : Stocke les listes de valeurs autorisées / énumérations (ex: matériau, statut) (validé aux Tests 10.1, 11).
+6. **`TB_RELATIONS`** : Stocke l'ensemble des liaisons inter-classes et le rattachement des attributs aux tables de domaines (validé aux Tests 9, 10.2).
 
 ---
 
-## 5. Protocole de mise en œuvre étape par étape
+## 5. Prise en charge des mécanismes métiers (Équivalence TKI PGP)
+
+Notre solution traduit chaque mécanisme métier d'Infrastructure Administrator directement en objets natifs PostgreSQL :
+
+### 1. Domaines de Valeurs (Listes de choix)
+* **Mécanisme Autodesk** : Tables de référence `_TBD` (Test 10.1).
+* **Traduction PostgreSQL** : Génération des tables de domaine sous PostgreSQL et ajout de contraintes `FOREIGN KEY` reliant l'attribut métier à sa table de domaine.
+
+### 2. Relations Parent / Enfant & Héritage
+* **Mécanisme Autodesk** : Table `TB_RELATIONS` (Test 9) et héritage `MODEL_F_CLASS_ID` (Test 12).
+* **Traduction PostgreSQL** : Création automatique des colonnes `FK` dans la table enfant et recopie des attributs hérités avec contraintes `ON DELETE CASCADE`.
+
+### 3. Calculs Automatiques et Intégrité Topologique
+* **Mécanisme Autodesk** : `TB_RULE_BASE` et règles applicatives.
+* **Traduction PostgreSQL** : Création de **Triggers PL/pgSQL** en base de données (ex: calcul automatique de la longueur `ST_Length(geom)` sur insertion ou mise à jour d'un câble).
+
+---
+
+## 6. Protocole de mise en œuvre étape par étape
 
 1. **Étape 1 — Écriture du script Python (`convert_autodesk_to_postgis.py`)** :
-   Développer le script lisant les tables `TB_DICTIONARY`, `TB_ATTRIBUTE`, `fdo_columns`, `geometry_columns` et `TB_RELATIONS` pour produire le code DDL PostgreSQL.
+   Développer le script lisant `TB_DICTIONARY`, `TB_ATTRIBUTE`, `fdo_columns`, `geometry_columns`, `TB_DOMAIN` et `TB_RELATIONS` pour générer le code DDL PostgreSQL complet (Tables, Foreign Keys, Triggers).
 
 2. **Étape 2 — Validation DDL sous PostgreSQL / PostGIS** :
-   Exécuter le script SQL dans PostgreSQL et vérifier la bonne création des tables métiers, des contraintes et des index GIST.
+   Exécuter le script SQL dans PostgreSQL et vérifier la bonne création des tables métiers, des tables de domaines, des contraintes FK, des index GiST et des Triggers.
 
 3. **Étape 3 — Raccordement temps réel dans AutoCAD Map 3D** :
    Établir la connexion FDO natif PostgreSQL dans Map 3D (`_MAPCONNECT`), charger les couches et tester la création/modification d'objets en direct.
