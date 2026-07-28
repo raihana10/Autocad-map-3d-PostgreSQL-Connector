@@ -4,7 +4,7 @@
 
 ---
 
-[ Version Française (French Version) ](README.md) | **English Version**
+[ Version Française (French Version) ](README_FR.md) | **English Version**
 
 ---
 
