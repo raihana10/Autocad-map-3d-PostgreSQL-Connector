@@ -9,22 +9,14 @@ PHASE   : Phase 5 — Architecture Cible (Approche A)
 
 DESCRIPTION :
 Ce script lit un fichier SQLite exporté depuis Autodesk Infrastructure Administrator,
-analyse les tables de métadonnées spécifiques d'Autodesk identifiées lors de la Phase 3
-(TB_DICTIONARY, TB_ATTRIBUTE, fdo_columns, geometry_columns, TB_RELATIONS), et génère
-un script SQL DDL PostgreSQL/PostGIS prêt à être exécuté.
-
-POURQUOI INTERROGER UNIQUEMENT CES TABLES ET PAS LES 170 TABLES SQLITE ?
--------------------------------------------------------------------------------
-Le fichier SQLite d'Autodesk contient ~170 tables. 150+ de ces tables sont de pures
-tables d'interface graphique Windows / AutoCAD Map 3D (ex: TB_GN_FLYIN_USER, TB_SETTINGS)
-ou d'émulation de séquences (TB_SEQUENCE_EMULATION).
-
-Seules 5 tables de métadonnées constituent le "cerveau" du Data Model :
-1. TB_DICTIONARY    : Catalogue des classes métiers (ex: VANNE, CANALISATION, REGARD).
-2. TB_ATTRIBUTE     : Registre des attributs créés par l'utilisateur pour chaque classe.
-3. fdo_columns      : Typage logique formel FDO (Texte, Nombre, Date, Booléen, Longueur).
-4. geometry_columns : Encodage spatial OGC (Point, LineString, Polygon, SRID).
-5. TB_RELATIONS     : Définition des associations (Clés étrangères classe ↔ classe ou classe ↔ domaine).
+analyse les 6 catalogues de métadonnées spécifiques d'Autodesk identifiés lors de la Phase 3
+(TB_DICTIONARY, TB_ATTRIBUTE, fdo_columns, geometry_columns, TB_DOMAIN, TB_RELATIONS),
+et génère un script SQL DDL PostgreSQL/PostGIS complet avec :
+- Tables métiers & types FDO exacts
+- Géométries PostGIS (Point, LineString, Polygon) & Index Spatiaux GiST
+- Tables de domaines (_TBD) et peuplement automatique des valeurs
+- Clés Étrangères (FOREIGN KEY) entre classes et vers les domaines
+- Triggers PL/pgSQL pour calculs automatiques (ex: ST_Length)
 
 ===============================================================================
 """
@@ -37,8 +29,6 @@ from pathlib import Path
 # =============================================================================
 # 1. TABLEAU DE CORRESPONDANCE DES TYPES (FDO -> POSTGRESQL)
 # =============================================================================
-# Dans Phase 3, nous avons découvert que fdo_columns stocke un code numérique (fdo_data_type)
-# qui définit l'intention logique métier d'Autodesk, au-delà du simple type SQLite brut.
 FDO_TO_POSTGRES_TYPES = {
     1: "boolean",           # FDO Boolean
     2: "smallint",          # FDO Byte
@@ -46,14 +36,13 @@ FDO_TO_POSTGRES_TYPES = {
     4: "numeric",           # FDO Decimal
     5: "smallint",          # FDO Int16
     6: "integer",           # FDO Int32
-    7: "integer",           # FDO Int64 / Number (ex: TEST_ATTRIBUT_02)
-    9: "varchar",           # FDO String / Text (ex: TEST_ATTRIBUT_01)
+    7: "integer",           # FDO Int64 / Number
+    9: "varchar",           # FDO String / Text
     10: "timestamp",        # FDO DateTime
     11: "date",             # FDO Date
     13: "bytea"             # FDO BLOB
 }
 
-# Code géométrique OGC standard (geometry_columns) -> Type PostGIS
 GEOM_TYPE_MAP = {
     1: "Point",
     2: "LineString",
@@ -71,14 +60,8 @@ GEOM_TYPE_MAP = {
 def get_autodesk_classes(conn: sqlite3.Connection):
     """
     Interroge TB_DICTIONARY (Catalogue maître des classes).
-    Permet d'extraire uniquement les tables métier créées par l'utilisateur,
-    en ignorant les 150+ tables système/interface.
-    
-    Retourne : Dictionnaire { F_CLASS_ID : { name, type, caption } }
     """
     cursor = conn.cursor()
-    
-    # Vérification que la table TB_DICTIONARY existe bien dans le SQLite
     cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='TB_DICTIONARY';")
     if not cursor.fetchone():
         raise ValueError("Erreur : La table système 'TB_DICTIONARY' est introuvable. Ce fichier SQLite n'est pas un Data Model Autodesk valide.")
@@ -93,7 +76,7 @@ def get_autodesk_classes(conn: sqlite3.Connection):
     for class_id, class_name, class_type, caption in cursor.fetchall():
         classes[class_id] = {
             "name": class_name.strip(),
-            "type": class_type.strip() if class_type else "N", # 'P'=Point, 'L'=Ligne, 'S'=Polygone, 'N'=Non géométrique
+            "type": class_type.strip() if class_type else "N",
             "caption": caption.strip() if caption else class_name
         }
     return classes
@@ -102,10 +85,6 @@ def get_autodesk_classes(conn: sqlite3.Connection):
 def get_fdo_column_metadata(conn: sqlite3.Connection):
     """
     Interroge fdo_columns (Dictionnaire FDO).
-    Récupère le vrai type logique FDO, la longueur maximale (fdo_data_length)
-    et la précision (fdo_data_precision).
-    
-    Retourne : Dictionnaire { (table_name, column_name) : { data_type, length, precision } }
     """
     cursor = conn.cursor()
     fdo_meta = {}
@@ -130,9 +109,6 @@ def get_fdo_column_metadata(conn: sqlite3.Connection):
 def get_spatial_metadata(conn: sqlite3.Connection):
     """
     Interroge geometry_columns (Catalogue spatial OGC).
-    Identifie la colonne géométrique (souvent 'GEOM') et son type spatial (Point, LineString...).
-    
-    Retourne : Dictionnaire { table_name : { geom_col, geom_type_name, srid } }
     """
     cursor = conn.cursor()
     spatial_meta = {}
@@ -149,19 +125,17 @@ def get_spatial_metadata(conn: sqlite3.Connection):
                 spatial_meta[tbl.strip().upper()] = {
                     "geom_col": gcol.strip() if gcol else "GEOM",
                     "geom_type": GEOM_TYPE_MAP.get(gtype, "Geometry"),
-                    "srid": srid if (srid and srid > 0) else 2154 # Par défaut Lambert-93 / SRID projet
+                    "srid": srid if (srid and srid > 0) else 2154
                 }
     return spatial_meta
 
 
 def get_physical_column_info(conn: sqlite3.Connection, table_name: str):
     """
-    Interroge PRAGMA table_info(table) de SQLite pour capturer les contraintes DDL physiques
-    (NOT NULL, DEFAULT) identifiées lors des Tests 4 et 5 de la Phase 3.
+    Interroge PRAGMA table_info(table) de SQLite.
     """
     cursor = conn.cursor()
     cursor.execute(f'PRAGMA table_info("{table_name}");')
-    # Structure PRAGMA : (cid, name, type, notnull, dflt_value, pk)
     cols = {}
     for row in cursor.fetchall():
         col_name = row[1].strip()
@@ -177,10 +151,7 @@ def get_physical_column_info(conn: sqlite3.Connection, table_name: str):
 
 def get_autodesk_relations(conn: sqlite3.Connection):
     """
-    Interroge TB_RELATIONS (Catalogue des liens classe-classe et classe-domaine).
-    Identifié lors du Test 9 et du Test 10.2 en Phase 3.
-    
-    Retourne : Liste de dictionnaires d'associations FK
+    Interroge TB_RELATIONS (Catalogue des liaisons inter-classes et classe-domaine).
     """
     cursor = conn.cursor()
     relations = []
@@ -202,6 +173,32 @@ def get_autodesk_relations(conn: sqlite3.Connection):
     return relations
 
 
+def get_domain_tables(conn: sqlite3.Connection):
+    """
+    Identifie toutes les tables de domaine (ex: tables finissant par _TBD ou présentes dans TB_DOMAIN).
+    Récupère leurs colonnes et leurs enregistrements (valeurs du domaine).
+    """
+    cursor = conn.cursor()
+    domain_tables = {}
+    
+    # 1. Recherche des tables dans sqlite_master finissant par _TBD
+    cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND (name LIKE '%_TBD' OR name LIKE 'TB_DOM_%');")
+    tbd_names = [r[0] for r in cursor.fetchall()]
+    
+    for tname in tbd_names:
+        cursor.execute(f'PRAGMA table_info("{tname}");')
+        cols = [r[1] for r in cursor.fetchall()]
+        
+        cursor.execute(f'SELECT * FROM "{tname}";')
+        rows = cursor.fetchall()
+        
+        domain_tables[tname] = {
+            "columns": cols,
+            "rows": rows
+        }
+    return domain_tables
+
+
 # =============================================================================
 # 3. MOTEUR DE GÉNÉRATION DU DDL POSTGRESQL / POSTGIS
 # =============================================================================
@@ -213,11 +210,11 @@ def generate_postgis_ddl(sqlite_path: str, default_srid: int = 2154) -> str:
     """
     conn = sqlite3.connect(sqlite_path)
     
-    # 1. Extraction des métadonnées Autodesk
     classes = get_autodesk_classes(conn)
     fdo_meta = get_fdo_column_metadata(conn)
     spatial_meta = get_spatial_metadata(conn)
     relations = get_autodesk_relations(conn)
+    domain_tables = get_domain_tables(conn)
     
     ddl_lines = []
     ddl_lines.append("-- ============================================================")
@@ -227,17 +224,60 @@ def generate_postgis_ddl(sqlite_path: str, default_srid: int = 2154) -> str:
     ddl_lines.append("-- ============================================================\n")
     ddl_lines.append("CREATE EXTENSION IF NOT EXISTS postgis;\n")
     
-    # 2. Boucle sur chaque classe métier trouvée dans TB_DICTIONARY
+    # -------------------------------------------------------------------------
+    # A. Génération des Tables de Domaines (_TBD) & Insertion des Valeurs (Tests 10.1, 11)
+    # -------------------------------------------------------------------------
+    if domain_tables:
+        ddl_lines.append("-- ============================================================")
+        ddl_lines.append("-- 1. TABLES DE DOMAINES DE VALEURS (_TBD) & VALEURS ENUMERÉES")
+        ddl_lines.append("-- ============================================================\n")
+        for dt_name, dt_info in domain_tables.items():
+            cols = dt_info["columns"]
+            rows = dt_info["rows"]
+            
+            ddl_lines.append(f'CREATE TABLE IF NOT EXISTS "{dt_name}" (')
+            col_defs = []
+            for col in cols:
+                if col.upper() in ["ID", "FID"]:
+                    col_defs.append(f'    "{col}" integer PRIMARY KEY')
+                else:
+                    col_defs.append(f'    "{col}" text')
+            ddl_lines.append(",\n".join(col_defs))
+            ddl_lines.append(");\n")
+            
+            # Insertions des valeurs de domaine
+            for r in rows:
+                val_strs = []
+                for val in r:
+                    if val is None:
+                        val_strs.append("NULL")
+                    elif isinstance(val, (int, float)):
+                        val_strs.append(str(val))
+                    else:
+                        escaped = str(val).replace("'", "''")
+                        val_strs.append(f"'{escaped}'")
+                col_names = ", ".join([f'"{c}"' for c in cols])
+                ddl_lines.append(f'INSERT INTO "{dt_name}" ({col_names}) VALUES ({", ".join(val_strs)}) ON CONFLICT DO NOTHING;')
+            ddl_lines.append("")
+
+    # -------------------------------------------------------------------------
+    # B. Génération des Tables Métiers (Classes)
+    # -------------------------------------------------------------------------
+    ddl_lines.append("-- ============================================================")
+    ddl_lines.append("-- 2. FEATURE CLASSES (TABLES METIERS ET GEOMETRIES POSTGIS)")
+    ddl_lines.append("-- ============================================================\n")
+    
+    triggers_to_generate = []
+    
     for class_id, class_info in classes.items():
         tbl_name = class_info["name"]
         class_type = class_info["type"]
         caption = class_info["caption"]
         
-        # Vérifier que la table existe physiquement dans SQLite
         cursor = conn.cursor()
         cursor.execute(f"SELECT name FROM sqlite_master WHERE type='table' AND name='{tbl_name}';")
         if not cursor.fetchone():
-            continue # Table présente dans le catalogue mais pas encore créée physiquement
+            continue
         
         phys_cols = get_physical_column_info(conn, tbl_name)
         tbl_spatial = spatial_meta.get(tbl_name.upper(), {})
@@ -250,21 +290,23 @@ def generate_postgis_ddl(sqlite_path: str, default_srid: int = 2154) -> str:
         column_defs = []
         pk_columns = []
         spatial_columns_to_index = []
+        has_length_col = False
+        geom_col_name = "GEOM"
         
         for col_upper, pinfo in phys_cols.items():
             col_name = pinfo["name"]
             
-            # Règle spéciale : Clé primaire FID (découverte Test 1)
+            if col_upper == "LENGTH":
+                has_length_col = True
+            
             if pinfo["pk"] or col_upper == "FID":
                 pk_columns.append(f'"{col_name}"')
                 column_defs.append(f'    "{col_name}" integer NOT NULL')
                 continue
             
-            # Règle spéciale : Champ Géométrie PostGIS (découverte Test 7 & 8)
             if col_upper == tbl_spatial.get("geom_col", "GEOM").upper() or (class_type in ['P', 'L', 'S'] and col_upper == "GEOM"):
                 gtype = tbl_spatial.get("geom_type")
                 if not gtype or gtype == "Geometry":
-                    # Fallback sur F_CLASS_TYPE de TB_DICTIONARY
                     if class_type == 'P': gtype = "Point"
                     elif class_type == 'L': gtype = "LineString"
                     elif class_type == 'S': gtype = "Polygon"
@@ -273,9 +315,9 @@ def generate_postgis_ddl(sqlite_path: str, default_srid: int = 2154) -> str:
                 srid = tbl_spatial.get("srid", default_srid)
                 column_defs.append(f'    "{col_name}" geometry({gtype}, {srid})')
                 spatial_columns_to_index.append((col_name, tbl_name))
+                geom_col_name = col_name
                 continue
             
-            # Traduction du type de donnée via fdo_columns ou fallback SQLite
             fmeta = fdo_meta.get((tbl_name.upper(), col_upper), {})
             fdo_dtype = fmeta.get("data_type")
             
@@ -284,7 +326,6 @@ def generate_postgis_ddl(sqlite_path: str, default_srid: int = 2154) -> str:
                 if pg_type == "varchar" and fmeta.get("length"):
                     pg_type = f"varchar({fmeta['length']})"
             else:
-                # Fallback sur type physique SQLite si absente de fdo_columns
                 raw = pinfo["raw_type"].upper()
                 if "INT" in raw: pg_type = "integer"
                 elif "CHAR" in raw or "TEXT" in raw: pg_type = "text"
@@ -292,8 +333,6 @@ def generate_postgis_ddl(sqlite_path: str, default_srid: int = 2154) -> str:
                 else: pg_type = "text"
             
             col_str = f'    "{col_name}" {pg_type}'
-            
-            # Ajout des contraintes NOT NULL (Test 5) et DEFAULT (Test 4)
             if pinfo["notnull"]:
                 col_str += " NOT NULL"
             if pinfo["default"] is not None:
@@ -301,36 +340,70 @@ def generate_postgis_ddl(sqlite_path: str, default_srid: int = 2154) -> str:
                 
             column_defs.append(col_str)
         
-        # Ajout de la contrainte PRIMARY KEY
         if pk_columns:
             column_defs.append(f'    PRIMARY KEY ({", ".join(pk_columns)})')
             
         ddl_lines.append(",\n".join(column_defs))
         ddl_lines.append(");\n")
         
-        # 3. Création des Index Spatiaux GIST (PostGIS)
+        # Index Spatiaux GiST
         for gcol, tname in spatial_columns_to_index:
             idx_name = f"idx_{tname}_{gcol}_gist"
             ddl_lines.append(f'CREATE INDEX IF NOT EXISTS "{idx_name}" ON "{tname}" USING GIST ("{gcol}");\n')
             
-    # 4. Création des Clés Étrangères (Test 9 & Test 10.2)
+        # Détection besoin Trigger de calcul de longueur (ex: LineString avec colonne LENGTH)
+        if class_type == 'L' and has_length_col:
+            triggers_to_generate.append((tbl_name, geom_col_name))
+
+    # -------------------------------------------------------------------------
+    # C. Création des Clés Étrangères (Relations inter-classes & Domaines) (Tests 9, 10.2)
+    # -------------------------------------------------------------------------
     if relations:
-        ddl_lines.append("-- ------------------------------------------------------------")
-        ddl_lines.append("-- Foreign Keys & Relationships (TB_RELATIONS)")
-        ddl_lines.append("-- ------------------------------------------------------------")
+        ddl_lines.append("-- ============================================================")
+        ddl_lines.append("-- 3. FOREIGN KEYS & RELATIONS (TB_RELATIONS)")
+        ddl_lines.append("-- ============================================================\n")
         for rel in relations:
             parent = rel["parent"]
             child = rel["child"]
             fk_col = rel["fk_col"]
             fk_constraint_name = f"fk_{child}_{fk_col}_{parent}"
             
-            # Sécurité : vérifier que parent et child existent dans le dictionnaire
             ddl_lines.append(
                 f'ALTER TABLE "{child}" ADD CONSTRAINT "{fk_constraint_name}" '
                 f'FOREIGN KEY ("{fk_col}") REFERENCES "{parent}" ("FID") ON DELETE SET NULL;'
             )
         ddl_lines.append("")
+
+    # -------------------------------------------------------------------------
+    # D. Génération des Triggers PL/pgSQL (Calculs automatiques ST_Length)
+    # -------------------------------------------------------------------------
+    if triggers_to_generate:
+        ddl_lines.append("-- ============================================================")
+        ddl_lines.append("-- 4. TRIGGERS PL/PGSQL POUR CALCULS AUTOMATIQUES (EX: ST_LENGTH)")
+        ddl_lines.append("-- ============================================================\n")
         
+        # Fonction générique PL/pgSQL de mise à jour de la longueur
+        ddl_lines.append("""
+CREATE OR REPLACE FUNCTION fn_calc_autodesk_length()
+RETURNS TRIGGER AS $$
+BEGIN
+    IF NEW.geom IS NOT NULL THEN
+        NEW.length := ST_Length(NEW.geom);
+    END IF;
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+""")
+        
+        for tname, gcol in triggers_to_generate:
+            trigger_name = f"trg_calc_length_{tname}"
+            ddl_lines.append(f'DROP TRIGGER IF EXISTS "{trigger_name}" ON "{tname}";')
+            ddl_lines.append(
+                f'CREATE TRIGGER "{trigger_name}" '
+                f'BEFORE INSERT OR UPDATE OF "{gcol}" ON "{tname}" '
+                f'FOR EACH ROW EXECUTE FUNCTION fn_calc_autodesk_length();\n'
+            )
+
     conn.close()
     return "\n".join(ddl_lines)
 
