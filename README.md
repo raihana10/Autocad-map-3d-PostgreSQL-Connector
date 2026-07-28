@@ -1,121 +1,134 @@
-# Alternative libre à TKI PGP — Industry Model Autodesk vers PostgreSQL/PostGIS
+# Open-Source Alternative to TKI PGP — Autodesk Industry Model to PostgreSQL/PostGIS
 
-> Projet de fin d'année (stage PFA) visant à concevoir une alternative open-source au connecteur commercial **TKI PGP**, permettant d'utiliser **PostgreSQL/PostGIS** comme moteur de stockage pour un **Industry Model** (Fachschale) Autodesk, en lieu et place d'Oracle ou de Microsoft SQL Server.
+> End-of-year internship project (PFA) aiming to design an open-source alternative to the commercial connector **TKI PGP**, enabling **PostgreSQL/PostGIS** to be used as the storage engine for an Autodesk **Industry Model** (*Fachschale*), instead of Oracle or Microsoft SQL Server.
 
 ---
 
-## Sommaire
+[ Version Française (French Version) ](README.md) | **English Version**
 
-- [Contexte](#contexte)
-- [Problématique](#problématique)
-- [Objectifs du projet](#objectifs-du-projet)
+---
+
+## Table of Contents
+
+- [Context](#context)
+- [Problem Statement](#problem-statement)
+- [Project Objectives](#project-objectives)
 - [Architecture](#architecture)
-- [Structure du dépôt](#structure-du-dépôt)
-- [Technologies utilisées](#technologies-utilisées)
-- [Méthodologie](#méthodologie)
-- [Limites et périmètre](#limites-et-périmètre)
-- [Auteurs](#auteurs)
-- [Licence](#licence)
+- [Repository Structure](#repository-structure)
+- [Technologies Used](#technologies-used)
+- [Methodology](#methodology)
+- [Limits and Scope](#limits-and-scope)
+- [Authors](#authors)
+- [License](#license)
 
 ---
 
-## Contexte
+## Context
 
-**AutoCAD Map 3D**, associé au module **Autodesk Infrastructure Administrator**, permet de créer des **Industry Models** (appelés *Fachschalen*) : des modèles de données métier destinés à la gestion d'infrastructures (réseaux d'eau, d'électricité, de gaz, de télécommunications, etc.).
+**AutoCAD Map 3D**, combined with **Autodesk Infrastructure Administrator**, allows creating **Industry Models** (called *Fachschalen*): domain data models dedicated to managing infrastructure (water, electricity, gas, telecommunications networks, etc.).
 
-Officiellement, un Industry Model de type « base de données » ne peut être créé que sur **Oracle** ou **Microsoft SQL Server**. **PostgreSQL** n'est pas proposé nativement, alors qu'il s'agit d'un système de gestion de base de données open source, gratuit, et disposant avec **PostGIS** d'une extension spatiale mature.
+Officially, a database-based Industry Model can only be created on **Oracle** or **Microsoft SQL Server**. **PostgreSQL** is not natively offered, even though it is a free, open-source relational database management system with **PostGIS**, a mature spatial extension.
 
-Pour combler ce manque, la société **TKI** commercialise un connecteur, **TKI PGP (PostgreSQL Provider)**, qui permet d'utiliser PostgreSQL/PostGIS comme moteur de stockage d'un Industry Model. Ce connecteur est cependant un produit **commercial et sous licence**.
+To bridge this gap, **TKI** commercializes a connector, **TKI PGP (PostgreSQL Provider)**, which allows using PostgreSQL/PostGIS as the storage engine for an Industry Model. However, this connector is a **commercial and licensed** product.
 
-## Problématique
+## Problem Statement
 
-Comment permettre à un Industry Model Autodesk d'être stocké et exploité dans PostgreSQL/PostGIS, avec un niveau de fonctionnalité comparable à TKI PGP (création du schéma, lecture, création, modification et suppression d'objets depuis AutoCAD Map 3D), **sans dépendre d'un produit commercial** ?
+How to allow an Autodesk Industry Model to be stored and used in PostgreSQL/PostGIS, with a functional level comparable to TKI PGP (schema creation, reading, creating, updating, and deleting objects from AutoCAD Map 3D), **without relying on a commercial product**?
 
-## Objectifs du projet
+## Project Objectives
 
-1. Comprendre en détail le fonctionnement interne du **Data Model** Autodesk (comment les classes d'objets, attributs, géométries, domaines et relations sont traduits en structures relationnelles).
-2. Comprendre le périmètre fonctionnel exact de **TKI PGP**, à partir de sa documentation publique et de son comportement observable, sans rétro-ingénierie de son code.
-3. Concevoir et comparer plusieurs architectures possibles pour une solution alternative.
-4. Développer un outil capable de générer automatiquement un schéma **PostgreSQL/PostGIS** équivalent à partir d'un Data Model Autodesk.
-5. Valider la solution par un scénario de bout en bout dans AutoCAD Map 3D.
+1. Understand in detail the internal operation of the Autodesk **Data Model** (how object classes, attributes, geometries, domains, and relationships are translated into relational structures).
+2. Understand the exact functional scope of **TKI PGP**, based on its public documentation and observable behavior, without reverse-engineering its code.
+3. Design and compare several possible architectures for an alternative solution.
+4. Develop a tool capable of automatically generating an equivalent **PostgreSQL/PostGIS** schema from an Autodesk Data Model.
+5. Validate the solution through an end-to-end scenario in AutoCAD Map 3D.
 
 ## Architecture
 
-### Architecture officielle Autodesk (référence)
+### Official Autodesk Architecture (Reference)
 
 ```
 Infrastructure Administrator ──► Data Model ──► Industry Model (Fachschale)
                                                         │
-                                          ┌─────────────┴─────────────┐
-                                          ▼                           ▼
-                                       Oracle                    SQL Server
-                                          │                           │
-                                          └─────────────┬─────────────┘
+                                           ┌─────────────┴─────────────┐
+                                           ▼                           ▼
+                                        Oracle                    SQL Server
+                                           │                           │
+                                           └─────────────┬─────────────┘
                                                          ▼
-                                                 AutoCAD Map 3D
+                                                  AutoCAD Map 3D
 ```
 
-### Architecture cible du projet
+### Project Target Architecture
 
 ```
-Infrastructure Administrator ──► Data Model (export SQLite)
-                                          │
-                                          ▼
-                         Générateur de schéma PostgreSQL/PostGIS
-                                  [en cours de conception]
-                                          │
-                                          ▼
-                                PostgreSQL + PostGIS
-                                          │
-                                          ▼
-                                 AutoCAD Map 3D
-                            [couche d'accès à développer]
+Infrastructure Administrator ──► Data Model (SQLite export)
+                                           │
+                                           ▼
+                         PostgreSQL/PostGIS Schema Generator
+                                   [Python Script]
+                                           │
+                                           ▼
+                                 PostgreSQL + PostGIS
+                                           │
+                                           ▼
+                                  AutoCAD Map 3D
+                            [Native FDO PostgreSQL Provider]
 ```
 
-
-
-## Structure du dépôt
+## Repository Structure
 
 ```
 .
 ├── Phase 1/
-│   └── 01-autodesk-architecture.md      # Phase 1 — architecture Autodesk observée
+│   ├── 01-autodesk-architecture.md      # Phase 1 — Observed Autodesk architecture (FR)
+│   └── 01-autodesk-architecture_EN.md   # Phase 1 — Observed Autodesk architecture (EN)
 ├── Phase 2/
-│   └── 02-postgis-postgresql.md         # Phase 2 — PostgreSQL/PostGIS et connecteur FDO
+│   ├── 02-postgis-postgresql.md         # Phase 2 — PostgreSQL/PostGIS and FDO connector (FR)
+│   └── 02-postgis-postgresql_EN.md      # Phase 2 — PostgreSQL/PostGIS and FDO connector (EN)
 ├── Phase 3-Reverse-Engineering/
-│   ├── compare_sqlite.py                # Script de comparaison automatisée de deux exports SQLite
-│   ├── rapport_test1_vs_test2.md        # Exemple de rapport de comparaison
-│   ├── Test0/ ... Test18/               # Campagne de tests différentiels (schéma + dump SQL par test)
-│   └── PFA-Phase 3.xlsx                 # Support de travail / document de synthèse
-└── README.md
+│   ├── 03-data-model-analyse.md         # Phase 3 — Data Model analysis & reverse engineering (FR)
+│   ├── 03-data-model-analyse_EN.md      # Phase 3 — Data Model analysis & reverse engineering (EN)
+│   ├── compare_sqlite.py                # Automated comparison script for SQLite exports
+│   ├── rapport_test1_vs_test2.md        # Example comparison report
+│   ├── Test0/ ... Test18/               # Differential test campaign (schema + SQL dump per test)
+│   └── PFA-Phase 3.xlsx                 # Synthesis spreadsheet
+├── Phase 4/
+│   ├── 04-role-tki-pgp.md               # Phase 4 — Role of TKI PGP in Autodesk architecture (FR)
+│   └── 04-role-tki-pgp_EN.md            # Phase 4 — Role of TKI PGP in Autodesk architecture (EN)
+├── Phase 5/
+│   ├── 05-architecture-cible.md         # Phase 5 — Target architecture & alternative solution (FR)
+│   ├── 05-architecture-cible_EN.md      # Phase 5 — Target architecture & alternative solution (EN)
+│   ├── convert_autodesk_to_postgis.py   # Automated SQLite to PostgreSQL DDL converter
+│   └── watch_and_sync.py                # Automated watcher and sync script
+├── README.md                            # Main README (French)
+└── README_EN.md                         # Main README (English)
 ```
 
-> Les documents `0X-*.md` correspondent chacun au livrable d'une phase du projet et sont complétés au fur et à mesure de l'avancement.
+## Technologies Used
 
-## Technologies utilisées
+- **AutoCAD Map 3D** / **Autodesk Infrastructure Administrator** — Reference environment
+- **PostgreSQL** / **PostGIS** — Target database
+- **SQLite** — Intermediate Data Model storage format, analyzed in Phase 3
+- **Python** — Analysis, comparison, and DDL generation scripts (`compare_sqlite.py`, `convert_autodesk_to_postgis.py`)
+- **Git** — Version control
 
-- **AutoCAD Map 3D** / **Autodesk Infrastructure Administrator** — environnement de référence
-- **PostgreSQL** / **PostGIS** — base de données cible
-- **SQLite** — format de stockage intermédiaire du Data Model, analysé en Phase 3
-- **Python** — scripts d'analyse et de comparaison (`compare_sqlite.py`)
-- **Git** — gestion de version
+## Methodology
 
-## Méthodologie
+Understanding the Autodesk Data Model relies on a **controlled differential reverse-engineering** method: each test consists of performing **a single modification** in Infrastructure Administrator (adding a class, attribute, relationship, etc.), then automatically comparing the state of the SQLite schema before and after to deduce, through reproducible observation, the mapping logic between the conceptual model and its physical representation.
 
-La compréhension du Data Model Autodesk repose sur une méthode de **reverse engineering par différentiel contrôlé** : chaque test consiste à effectuer **une seule modification** dans Infrastructure Administrator (ajout d'une classe, d'un attribut, d'une relation, etc.), puis à comparer automatiquement l'état du schéma SQLite avant/après pour en déduire, par observation reproductible, la logique de correspondance entre le modèle conceptuel et sa représentation physique.
+## Scope and Limits
 
-## Limites et périmètre
+- The project focuses exclusively on **TKI PGP**; the **TKI NET** industry solution is outside the scope of the internship.
+- No reverse-engineering of TKI PGP's code is performed: the analysis is based solely on public documentation and observable product behavior.
+- Development relies on test Data Models created specifically for this project, not on production data.
 
-- Le projet se concentre exclusivement sur **TKI PGP** ; la solution métier **TKI NET** n'entre pas dans le périmètre du stage.
-- Aucune rétro-ingénierie du code de TKI PGP n'est réalisée : l'analyse se base uniquement sur la documentation publique et le comportement observable du produit.
-- Le développement s'appuie sur des Data Models de test créés spécifiquement pour ce projet, et non sur des données de production.
+## Authors
 
-## Auteurs
+Project carried out as part of an end-of-year internship (PFA), in a team of two.
 
-Projet réalisé dans le cadre d'un stage de fin d'année (PFA), en binôme.
+## License
 
-## Licence
+© 2026 — All rights reserved.
 
-© 2026 — Tous droits réservés.
-
-Ce projet est réalisé dans le cadre d'un stage de fin d'année. Son statut de propriété intellectuelle n'est pas encore définitivement fixé. Aucune licence d'utilisation, de copie, de modification ou de redistribution n'est accordée à ce stade. Le code est visible publiquement à titre de démonstration/portfolio uniquement.
+This project was carried out as part of an end-of-year internship. Its intellectual property status is not yet permanently settled. No license to use, copy, modify, or redistribute is granted at this stage. The code is publicly visible for demonstration/portfolio purposes only.
