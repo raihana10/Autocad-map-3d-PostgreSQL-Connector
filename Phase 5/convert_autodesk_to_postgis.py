@@ -219,6 +219,20 @@ def get_autodesk_relations(conn: sqlite3.Connection):
     return relations
 
 
+def get_pk_column_name(conn: sqlite3.Connection, table_name: str) -> str:
+    """
+    Retourne le nom réel de la clé primaire d'une table SQLite.
+    Cherche d'abord FID, puis ID, puis la première colonne PK PRAGMA.
+    """
+    cursor = conn.cursor()
+    cursor.execute(f'PRAGMA table_info("{table_name}");')
+    pk_cols = [(row[1], row[5]) for row in cursor.fetchall() if row[5] > 0]  # row[5] = pk flag
+    if pk_cols:
+        pk_name = pk_cols[0][0]
+        return pk_name
+    return "FID"  # Fallback
+
+
 def get_domain_tables(conn: sqlite3.Connection):
     """
     Identifie toutes les tables de domaine (ex: tables finissant par _TBD ou présentes dans TB_DOMAIN).
@@ -412,10 +426,11 @@ def generate_postgis_ddl(sqlite_path: str, default_srid: int = 2154) -> str:
             child = rel["child"]
             fk_col = rel["fk_col"]
             fk_constraint_name = f"fk_{child}_{fk_col}_{parent}"
-            
+            # Détecte dynamiquement la PK de la table parente (FID pour classes, ID pour domaines)
+            parent_pk = get_pk_column_name(conn, parent)
             ddl_lines.append(
                 f'ALTER TABLE "{child}" ADD CONSTRAINT "{fk_constraint_name}" '
-                f'FOREIGN KEY ("{fk_col}") REFERENCES "{parent}" ("FID") ON DELETE SET NULL;'
+                f'FOREIGN KEY ("{fk_col}") REFERENCES "{parent}" ("{parent_pk}") ON DELETE SET NULL;'
             )
         ddl_lines.append("")
 
