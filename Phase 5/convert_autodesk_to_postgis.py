@@ -82,51 +82,78 @@ def get_autodesk_classes(conn: sqlite3.Connection):
     return classes
 
 
+def find_col_name(cursor, table_name: str, candidates: list):
+    """
+    Inspecte dynamiquement les colonnes d'une table SQLite pour trouver le nom exact d'une colonne parmi une liste de candidats.
+    """
+    cursor.execute(f'PRAGMA table_info("{table_name}");')
+    cols = [row[1] for row in cursor.fetchall()]
+    cols_lower = [c.lower() for c in cols]
+    for cand in candidates:
+        if cand.lower() in cols_lower:
+            idx = cols_lower.index(cand.lower())
+            return cols[idx]
+    return None
+
+
 def get_fdo_column_metadata(conn: sqlite3.Connection):
     """
     Interroge fdo_columns (Dictionnaire FDO).
+    Détecte dynamiquement les noms de colonnes pour éviter tout échec.
     """
     cursor = conn.cursor()
     fdo_meta = {}
     
     cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='fdo_columns';")
     if cursor.fetchone():
-        query = """
-            SELECT fdo_feature_class_name, fdo_column_name, fdo_data_type, fdo_data_length, fdo_data_precision
-            FROM fdo_columns;
-        """
-        cursor.execute(query)
-        for tbl, col, dtype, dlen, dprec in cursor.fetchall():
-            if tbl and col:
-                fdo_meta[(tbl.strip().upper(), col.strip().upper())] = {
-                    "data_type": dtype,
-                    "length": dlen,
-                    "precision": dprec
-                }
+        tbl_col = find_col_name(cursor, "fdo_columns", ["featureclass_name", "feature_class_name", "fdo_feature_class_name", "table_name", "class_name"])
+        col_col = find_col_name(cursor, "fdo_columns", ["column_name", "fdo_column_name", "name"])
+        type_col = find_col_name(cursor, "fdo_columns", ["data_type", "fdo_data_type", "type"])
+        len_col = find_col_name(cursor, "fdo_columns", ["data_length", "fdo_data_length", "length"])
+        prec_col = find_col_name(cursor, "fdo_columns", ["data_precision", "fdo_data_precision", "precision"])
+        
+        if tbl_col and col_col and type_col:
+            len_str = f'"{len_col}"' if len_col else "NULL"
+            prec_str = f'"{prec_col}"' if prec_col else "NULL"
+            query = f'SELECT "{tbl_col}", "{col_col}", "{type_col}", {len_str}, {prec_str} FROM "fdo_columns";'
+            cursor.execute(query)
+            for tbl, col, dtype, dlen, dprec in cursor.fetchall():
+                if tbl and col:
+                    fdo_meta[(str(tbl).strip().upper(), str(col).strip().upper())] = {
+                        "data_type": dtype,
+                        "length": dlen,
+                        "precision": dprec
+                    }
     return fdo_meta
 
 
 def get_spatial_metadata(conn: sqlite3.Connection):
     """
     Interroge geometry_columns (Catalogue spatial OGC).
+    Détecte dynamiquement les noms de colonnes.
     """
     cursor = conn.cursor()
     spatial_meta = {}
     
     cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='geometry_columns';")
     if cursor.fetchone():
-        query = """
-            SELECT f_table_name, f_geometry_column, geometry_type, srid
-            FROM geometry_columns;
-        """
-        cursor.execute(query)
-        for tbl, gcol, gtype, srid in cursor.fetchall():
-            if tbl:
-                spatial_meta[tbl.strip().upper()] = {
-                    "geom_col": gcol.strip() if gcol else "GEOM",
-                    "geom_type": GEOM_TYPE_MAP.get(gtype, "Geometry"),
-                    "srid": srid if (srid and srid > 0) else 2154
-                }
+        tbl_col = find_col_name(cursor, "geometry_columns", ["f_table_name", "table_name", "feature_class_name"])
+        geom_col = find_col_name(cursor, "geometry_columns", ["f_geometry_column", "geometry_column", "column_name", "geom_column"])
+        type_col = find_col_name(cursor, "geometry_columns", ["geometry_type", "type", "spatial_type"])
+        srid_col = find_col_name(cursor, "geometry_columns", ["srid", "spatial_ref_sys_id", "epsg"])
+        
+        if tbl_col and geom_col:
+            type_str = f'"{type_col}"' if type_col else "NULL"
+            srid_str = f'"{srid_col}"' if srid_col else "NULL"
+            query = f'SELECT "{tbl_col}", "{geom_col}", {type_str}, {srid_str} FROM "geometry_columns";'
+            cursor.execute(query)
+            for tbl, gcol, gtype, srid in cursor.fetchall():
+                if tbl:
+                    spatial_meta[str(tbl).strip().upper()] = {
+                        "geom_col": str(gcol).strip() if gcol else "GEOM",
+                        "geom_type": GEOM_TYPE_MAP.get(gtype, "Geometry") if isinstance(gtype, int) else (gtype or "Geometry"),
+                        "srid": srid if (isinstance(srid, int) and srid > 0) else 2154
+                    }
     return spatial_meta
 
 
