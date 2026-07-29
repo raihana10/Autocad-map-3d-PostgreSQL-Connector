@@ -28,12 +28,13 @@ import os
 import sys
 import time
 import subprocess
+import argparse
 from pathlib import Path
 
 # Intervalle de vérification en secondes (ex: vérifier toutes les 2 secondes)
 CHECK_INTERVAL_SECONDS = 2
 
-def run_conversion_and_apply(sqlite_path: str, output_sql: str, pg_conn_string: str = None):
+def run_conversion_and_apply(sqlite_path: str, output_sql: str, pg_conn_string: str = None, srid: int = 2154):
     """
     Exécute le script de conversion et applique éventuellement le DDL sur PostgreSQL.
     """
@@ -48,7 +49,8 @@ def run_conversion_and_apply(sqlite_path: str, output_sql: str, pg_conn_string: 
         sys.executable,
         str(converter_script),
         "--db", sqlite_path,
-        "--out", output_sql
+        "--out", output_sql,
+        "--srid", str(srid)
     ]
     
     result = subprocess.run(cmd, capture_output=True, text=True)
@@ -77,7 +79,7 @@ def run_conversion_and_apply(sqlite_path: str, output_sql: str, pg_conn_string: 
         print(f"[❌] Erreur lors de la conversion DDL : {result.stderr}")
 
 
-def watch_file(sqlite_path: str, output_sql: str, pg_conn_string: str = None):
+def watch_file(sqlite_path: str, output_sql: str, pg_conn_string: str = None, srid: int = 2154, run_initial_sync: bool = False):
     """
     Boucle de surveillance du fichier SQLite.
     """
@@ -91,9 +93,16 @@ def watch_file(sqlite_path: str, output_sql: str, pg_conn_string: str = None):
     print("===================================================================")
     print(f"[👀] Surveillance active sur : {target_file.resolve()}")
     print(f"[⏱] Fréquence de contrôle : Toutes les {CHECK_INTERVAL_SECONDS} secondes.")
+    if pg_conn_string:
+        print("[🗄] Mode : génération + application automatique dans PostgreSQL")
+    else:
+        print("[📄] Mode : génération du fichier DDL uniquement (pas d'application PostgreSQL)")
     print("[Presser CTRL+C pour arrêter le service]\n")
     
     last_mtime = target_file.stat().st_mtime
+
+    if run_initial_sync:
+        run_conversion_and_apply(sqlite_path, output_sql, pg_conn_string, srid)
     
     try:
         while True:
@@ -102,17 +111,29 @@ def watch_file(sqlite_path: str, output_sql: str, pg_conn_string: str = None):
                 current_mtime = target_file.stat().st_mtime
                 if current_mtime != last_mtime:
                     last_mtime = current_mtime
-                    run_conversion_and_apply(sqlite_path, output_sql, pg_conn_string)
+                    run_conversion_and_apply(sqlite_path, output_sql, pg_conn_string, srid)
     except KeyboardInterrupt:
         print("\n[⏹] Arrêt du service de surveillance automatique.")
 
 
 if __name__ == "__main__":
-    if len(sys.argv) < 2:
-        print("Usage : python watch_and_sync.py <chemin_vers_datamodel.sqlite> [output.sql]")
-        sys.exit(1)
-        
-    sqlite_file = sys.argv[1]
-    out_sql = sys.argv[2] if len(sys.argv) > 2 else "schema_postgis_autosync.sql"
-    
-    watch_file(sqlite_file, out_sql)
+    parser = argparse.ArgumentParser(
+        description="Surveille un Data Model Autodesk et applique automatiquement le DDL dans PostgreSQL."
+    )
+    parser.add_argument("sqlite_file", help="Chemin vers le fichier Data Model SQLite")
+    parser.add_argument("output_sql", nargs="?", default="schema_postgis_autosync.sql", help="Fichier SQL généré")
+    parser.add_argument("--pg-conn", dest="pg_conn_string", default=os.getenv("PG_CONN_STRING"),
+                        help="Chaîne de connexion PostgreSQL/psycopg2. Peut aussi venir de la variable d'environnement PG_CONN_STRING.")
+    parser.add_argument("--srid", type=int, default=2154, help="Code EPSG / SRID spatial PostGIS (def: 2154)")
+    parser.add_argument("--initial-sync", action="store_true",
+                        help="Exécute une synchronisation immédiate au démarrage, sans attendre une première modification du fichier.")
+
+    args = parser.parse_args()
+
+    watch_file(
+        args.sqlite_file,
+        args.output_sql,
+        pg_conn_string=args.pg_conn_string,
+        srid=args.srid,
+        run_initial_sync=args.initial_sync
+    )
