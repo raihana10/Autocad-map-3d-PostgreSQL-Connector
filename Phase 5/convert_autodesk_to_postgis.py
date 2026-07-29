@@ -57,43 +57,55 @@ GEOM_TYPE_MAP = {
 # 2. FONCTIONS DE LECTURE DU DATA MODEL AUTODESK (PHASE 3)
 # =============================================================================
 
+def find_col_name(cursor, table_name: str, candidates: list):
+    """
+    Inspecte dynamiquement les colonnes d'une table SQLite pour trouver le nom exact d'une colonne parmi une liste de candidats.
+    """
+    try:
+        cursor.execute(f'PRAGMA table_info("{table_name}");')
+        cols = [row[1] for row in cursor.fetchall()]
+        cols_lower = [c.lower() for c in cols]
+        for cand in candidates:
+            if cand.lower() in cols_lower:
+                idx = cols_lower.index(cand.lower())
+                return cols[idx]
+    except Exception:
+        pass
+    return None
+
+
 def get_autodesk_classes(conn: sqlite3.Connection):
     """
     Interroge TB_DICTIONARY (Catalogue maître des classes).
+    Détecte dynamiquement les noms de colonnes.
     """
     cursor = conn.cursor()
     cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='TB_DICTIONARY';")
     if not cursor.fetchone():
         raise ValueError("Erreur : La table système 'TB_DICTIONARY' est introuvable. Ce fichier SQLite n'est pas un Data Model Autodesk valide.")
 
-    query = """
-        SELECT F_CLASS_ID, F_CLASS_NAME, F_CLASS_TYPE, CAPTION
-        FROM TB_DICTIONARY
-        WHERE F_CLASS_NAME IS NOT NULL AND F_CLASS_NAME != '';
-    """
+    id_col = find_col_name(cursor, "TB_DICTIONARY", ["f_class_id", "class_id", "id"])
+    name_col = find_col_name(cursor, "TB_DICTIONARY", ["f_class_name", "class_name", "name", "table_name"])
+    type_col = find_col_name(cursor, "TB_DICTIONARY", ["f_class_type", "class_type", "type"])
+    caption_col = find_col_name(cursor, "TB_DICTIONARY", ["caption", "label", "description", "title"])
+    
+    if not name_col:
+        raise ValueError("Erreur : Impossible d'identifier la colonne du nom de classe dans 'TB_DICTIONARY'.")
+        
+    id_str = f'"{id_col}"' if id_col else "rowid"
+    type_str = f'"{type_col}"' if type_col else "'N'"
+    cap_str = f'"{caption_col}"' if caption_col else f'"{name_col}"'
+    
+    query = f'SELECT {id_str}, "{name_col}", {type_str}, {cap_str} FROM "TB_DICTIONARY" WHERE "{name_col}" IS NOT NULL AND "{name_col}" != \'\';'
     cursor.execute(query)
     classes = {}
     for class_id, class_name, class_type, caption in cursor.fetchall():
         classes[class_id] = {
-            "name": class_name.strip(),
-            "type": class_type.strip() if class_type else "N",
-            "caption": caption.strip() if caption else class_name
+            "name": str(class_name).strip(),
+            "type": str(class_type).strip() if class_type else "N",
+            "caption": str(caption).strip() if caption else str(class_name)
         }
     return classes
-
-
-def find_col_name(cursor, table_name: str, candidates: list):
-    """
-    Inspecte dynamiquement les colonnes d'une table SQLite pour trouver le nom exact d'une colonne parmi une liste de candidats.
-    """
-    cursor.execute(f'PRAGMA table_info("{table_name}");')
-    cols = [row[1] for row in cursor.fetchall()]
-    cols_lower = [c.lower() for c in cols]
-    for cand in candidates:
-        if cand.lower() in cols_lower:
-            idx = cols_lower.index(cand.lower())
-            return cols[idx]
-    return None
 
 
 def get_fdo_column_metadata(conn: sqlite3.Connection):
@@ -179,24 +191,31 @@ def get_physical_column_info(conn: sqlite3.Connection, table_name: str):
 def get_autodesk_relations(conn: sqlite3.Connection):
     """
     Interroge TB_RELATIONS (Catalogue des liaisons inter-classes et classe-domaine).
+    Détecte dynamiquement les noms de colonnes.
     """
     cursor = conn.cursor()
     relations = []
     
     cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='TB_RELATIONS';")
     if cursor.fetchone():
-        query = """
-            SELECT PARENT_TABLE_NAME, CHILD_TABLE_NAME, FK_COLUMN_NAME
-            FROM TB_RELATIONS
-            WHERE PARENT_TABLE_NAME IS NOT NULL AND CHILD_TABLE_NAME IS NOT NULL;
-        """
-        cursor.execute(query)
-        for parent, child, fk_col in cursor.fetchall():
-            relations.append({
-                "parent": parent.strip(),
-                "child": child.strip(),
-                "fk_col": fk_col.strip() if fk_col else f"{parent.strip()}_ID"
-            })
+        p_col = find_col_name(cursor, "TB_RELATIONS", ["parent_table_name", "parent_table", "parent_class_name", "parent_name", "table_name_parent"])
+        c_col = find_col_name(cursor, "TB_RELATIONS", ["child_table_name", "child_table", "child_class_name", "child_name", "table_name_child"])
+        fk_col = find_col_name(cursor, "TB_RELATIONS", ["fk_column_name", "fk_column", "foreign_key", "fk_name", "column_name", "fk_field"])
+        
+        if p_col and c_col:
+            fk_str = f'"{fk_col}"' if fk_col else "NULL"
+            query = f'SELECT "{p_col}", "{c_col}", {fk_str} FROM "TB_RELATIONS" WHERE "{p_col}" IS NOT NULL AND "{c_col}" IS NOT NULL;'
+            try:
+                cursor.execute(query)
+                for parent, child, fk in cursor.fetchall():
+                    if parent and child:
+                        relations.append({
+                            "parent": str(parent).strip(),
+                            "child": str(child).strip(),
+                            "fk_col": str(fk).strip() if fk else f"{str(parent).strip()}_ID"
+                        })
+            except Exception:
+                pass
     return relations
 
 
@@ -208,21 +227,23 @@ def get_domain_tables(conn: sqlite3.Connection):
     cursor = conn.cursor()
     domain_tables = {}
     
-    # 1. Recherche des tables dans sqlite_master finissant par _TBD
     cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND (name LIKE '%_TBD' OR name LIKE 'TB_DOM_%');")
     tbd_names = [r[0] for r in cursor.fetchall()]
     
     for tname in tbd_names:
-        cursor.execute(f'PRAGMA table_info("{tname}");')
-        cols = [r[1] for r in cursor.fetchall()]
-        
-        cursor.execute(f'SELECT * FROM "{tname}";')
-        rows = cursor.fetchall()
-        
-        domain_tables[tname] = {
-            "columns": cols,
-            "rows": rows
-        }
+        try:
+            cursor.execute(f'PRAGMA table_info("{tname}");')
+            cols = [r[1] for r in cursor.fetchall()]
+            
+            cursor.execute(f'SELECT * FROM "{tname}";')
+            rows = cursor.fetchall()
+            
+            domain_tables[tname] = {
+                "columns": cols,
+                "rows": rows
+            }
+        except Exception:
+            pass
     return domain_tables
 
 
@@ -272,7 +293,6 @@ def generate_postgis_ddl(sqlite_path: str, default_srid: int = 2154) -> str:
             ddl_lines.append(",\n".join(col_defs))
             ddl_lines.append(");\n")
             
-            # Insertions des valeurs de domaine
             for r in rows:
                 val_strs = []
                 for val in r:
@@ -373,12 +393,10 @@ def generate_postgis_ddl(sqlite_path: str, default_srid: int = 2154) -> str:
         ddl_lines.append(",\n".join(column_defs))
         ddl_lines.append(");\n")
         
-        # Index Spatiaux GiST
         for gcol, tname in spatial_columns_to_index:
             idx_name = f"idx_{tname}_{gcol}_gist"
             ddl_lines.append(f'CREATE INDEX IF NOT EXISTS "{idx_name}" ON "{tname}" USING GIST ("{gcol}");\n')
             
-        # Détection besoin Trigger de calcul de longueur (ex: LineString avec colonne LENGTH)
         if class_type == 'L' and has_length_col:
             triggers_to_generate.append((tbl_name, geom_col_name))
 
@@ -409,7 +427,6 @@ def generate_postgis_ddl(sqlite_path: str, default_srid: int = 2154) -> str:
         ddl_lines.append("-- 4. TRIGGERS PL/PGSQL POUR CALCULS AUTOMATIQUES (EX: ST_LENGTH)")
         ddl_lines.append("-- ============================================================\n")
         
-        # Fonction générique PL/pgSQL de mise à jour de la longueur
         ddl_lines.append("""
 CREATE OR REPLACE FUNCTION fn_calc_autodesk_length()
 RETURNS TRIGGER AS $$
