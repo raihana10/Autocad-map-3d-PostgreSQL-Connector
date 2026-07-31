@@ -73,36 +73,36 @@ Pour couvrir l'intégralité des fonctionnalités d'un Industry Model et égaler
 5. **`TB_DOMAIN` + Tables `<DOMAIN>_TBD`** : Stocke les listes de valeurs autorisées / énumérations (ex: matériau, statut) (validé aux Tests 10.1, 11).
 6. **`TB_RELATIONS`** : Stocke l'ensemble des liaisons inter-classes et le rattachement des attributs aux tables de domaines (validé aux Tests 9, 10.2).
 
----
-
-## 5. Prise en charge des mécanismes métiers (Équivalence TKI PGP)
-
-Notre solution traduit chaque mécanisme métier d'Infrastructure Administrator directement en objets natifs PostgreSQL :
-
-### 1. Domaines de Valeurs (Listes de choix)
-* **Mécanisme Autodesk** : Tables de référence `_TBD` (Test 10.1).
-* **Traduction PostgreSQL** : Génération des tables de domaine sous PostgreSQL et ajout de contraintes `FOREIGN KEY` reliant l'attribut métier à sa table de domaine.
-
-### 2. Relations Parent / Enfant & Héritage
-* **Mécanisme Autodesk** : Table `TB_RELATIONS` (Test 9) et héritage `MODEL_F_CLASS_ID` (Test 12).
-* **Traduction PostgreSQL** : Création automatique des colonnes `FK` dans la table enfant et recopie des attributs hérités avec contraintes `ON DELETE CASCADE`.
-
-### 3. Calculs Automatiques et Intégrité Topologique
-* **Mécanisme Autodesk** : `TB_RULE_BASE` et règles applicatives.
-* **Traduction PostgreSQL** : Création de **Triggers PL/pgSQL** en base de données (ex: calcul automatique de la longueur `ST_Length(geom)` sur insertion ou mise à jour d'un câble).
+### 4. Clés Étrangères Dynamiques (FID vs ID)
+* **Mécanisme Autodesk** : Liaison entre classes métiers (référençant `FID`) et liaisons vers les tables de domaines `_TBD` (référençant `ID`).
+* **Traduction PostgreSQL** : Introspection dynamique de la clé primaire (`PK`) de la table parente avant de générer la contrainte `FOREIGN KEY` (`"FID"` pour classes, `"ID"` pour domaines).
 
 ---
 
-## 6. Protocole de mise en œuvre étape par étape
+## 6. Moteur de Recherche et Synchronisation Arrière-Plan (`watch_and_sync.py`)
+
+Pour garantir un fonctionnement 100% transparent et zéro-intervention pour les utilisateurs :
+
+1. **Recherche Générale et Dynamique des Fichiers SQLite** :
+   - Exploitation de `tempfile.gettempdir()` (%TEMP% Windows) pour éviter les chemins en dur.
+   - Validation dynamique de l'Industry Model via la présence de la table `TB_DICTIONARY`.
+   - Filtrage et sélection automatique du fichier le plus récent basé sur l'horodatage (`st_mtime`).
+2. **Synchronisation Non Destructive** :
+   - Utilisation systématique de `CREATE TABLE IF NOT EXISTS`, `INSERT ON CONFLICT DO NOTHING` et `ALTER TABLE ADD COLUMN IF NOT EXISTS`.
+   - Maintien intégral des données géométriques et attributaires existantes saisies par les cartographes sous PostGIS lors des mises à jour du Data Model.
+
+---
+
+## 7. Protocole de validation et étapes de test
 
 1. **Étape 1 — Écriture du script Python (`convert_autodesk_to_postgis.py`)** :
-   Développer le script lisant `TB_DICTIONARY`, `TB_ATTRIBUTE`, `fdo_columns`, `geometry_columns`, `TB_DOMAIN` et `TB_RELATIONS` pour générer le code DDL PostgreSQL complet (Tables, Foreign Keys, Triggers).
+   Développer le script lisant les catalogues maîtres (`TB_DICTIONARY`, `TB_ATTRIBUTE`, `fdo_columns`, `geometry_columns`, `TB_DOMAIN`, `TB_RELATIONS`) avec détection dynamique de colonnes.
 
-2. **Étape 2 — Validation DDL sous PostgreSQL / PostGIS** :
-   Exécuter le script SQL dans PostgreSQL et vérifier la bonne création des tables métiers, des tables de domaines, des contraintes FK, des index GiST et des Triggers.
+2. **Étape 2 — Validation du Service de Surveillance (`watch_and_sync.py`)** :
+   Tester la détection automatique dans `%TEMP%`, la génération DDL et la résilience face à la fermeture/réouverture d'Infrastructure Administrator.
 
 3. **Étape 3 — Raccordement temps réel dans AutoCAD Map 3D** :
-   Établir la connexion FDO natif PostgreSQL dans Map 3D (`_MAPCONNECT`), charger les couches et tester la création/modification d'objets en direct.
+   Établir la connexion FDO natif PostgreSQL dans Map 3D (`_MAPCONNECT`), charger les couches et valider l'édition temps réel.
 
-4. **Étape 4 — Bilan et documentation finale** :
-   Capturer les preuves d'interaction bidirectionnelle entre Map 3D et PostgreSQL pour valider définitivement la Phase 5.
+4. **Étape 4 — Transition vers la Phase 6** :
+   Développement de l'interface graphique (GUI Admin) et packaging sous forme de Service Windows d'arrière-plan.
