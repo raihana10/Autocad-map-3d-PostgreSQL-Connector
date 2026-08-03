@@ -35,6 +35,12 @@ import subprocess
 import argparse
 from pathlib import Path
 
+# Force l'encodage UTF-8 pour la console Windows afin d'éviter les erreurs charmap
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+if hasattr(sys.stderr, "reconfigure"):
+    sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+
 # Intervalle de vérification en secondes
 CHECK_INTERVAL_SECONDS = 2
 
@@ -153,7 +159,9 @@ def run_conversion_and_apply(sqlite_path: str, output_sql: str, pg_host="localho
         "--srid", str(srid)
     ]
     
-    result = subprocess.run(cmd, capture_output=True, text=True)
+    env = os.environ.copy()
+    env["PYTHONIOENCODING"] = "utf-8"
+    result = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace", env=env)
     
     if result.returncode == 0:
         print(f"[✔] Conversion DDL réussie -> {output_sql}")
