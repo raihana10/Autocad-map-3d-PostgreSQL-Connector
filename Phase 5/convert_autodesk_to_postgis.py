@@ -356,7 +356,17 @@ def generate_postgis_ddl(sqlite_path: str, default_srid: int = 2154) -> str:
             phys_cols = {}
             
         if not phys_cols:
-            continue
+            phys_cols = {
+                "FID": {"name": "FID", "raw_type": "INTEGER", "notnull": True, "default": None, "pk": True}
+            }
+            if class_type in ['P', 'L', 'S', '1', '2', '3']:
+                phys_cols["GEOM"] = {"name": "GEOM", "raw_type": "GEOMETRY", "notnull": False, "default": None, "pk": False}
+            if class_type == 'L':
+                phys_cols["LENGTH"] = {"name": "LENGTH", "raw_type": "DOUBLE", "notnull": False, "default": None, "pk": False}
+                
+            for (f_tbl, f_col), f_info in fdo_meta.items():
+                if f_tbl == tbl_name.upper() and f_col not in phys_cols:
+                    phys_cols[f_col] = {"name": f_col, "raw_type": "VARCHAR", "notnull": False, "default": None, "pk": False}
         
         tbl_spatial = spatial_meta.get(tbl_name.upper(), {})
         
