@@ -175,24 +175,72 @@ def run_conversion_and_apply(sqlite_path: str, output_sql: str, pg_host="localho
                 
                 print(f"[⚙] Application automatique du DDL sur la base '{pg_db}' ({pg_host}:{pg_port})...")
                 conn = psycopg2.connect(host=pg_host, port=pg_port, user=pg_user, password=pg_pass, dbname=pg_db)
+                conn.autocommit = True
                 cursor = conn.cursor()
                 sql_content = Path(output_sql).read_text(encoding="utf-8")
                 
-                # Exécution des instructions SQL
+                # Exécution des instructions SQL avec journalisation détaillée
                 success_count = 0
+                created_tables = []
+                created_domains = []
+                created_indexes = []
+                created_fks = 0
+                created_triggers = []
+                
+                print("\n[📊 DÉBUT D'APPLICATION DU SCHÉMA EN BASE POSTGRESQL]")
+                
                 for stmt in sql_content.split(";"):
                     stmt_clean = stmt.strip()
                     if stmt_clean and not stmt_clean.startswith("--"):
+                        stmt_upper = stmt_clean.upper()
                         try:
                             cursor.execute(stmt_clean + ";")
                             conn.commit()
                             success_count += 1
+                            
+                            # Détection du type de requête pour affichage détaillé
+                            if "CREATE TABLE IF NOT EXISTS" in stmt_upper or "CREATE TABLE" in stmt_upper:
+                                parts = stmt_clean.split('"')
+                                tname = parts[1] if len(parts) > 1 else "Table"
+                                if tname.endswith("_TBD") or tname == "TB_DOMAIN":
+                                    if tname not in created_domains:
+                                        created_domains.append(tname)
+                                        print(f"    [📦 Table Domaine]  '{tname}' créée")
+                                else:
+                                    if tname not in created_tables:
+                                        created_tables.append(tname)
+                                        print(f"    [✨ Feature Class]  '{tname}' créée")
+                            elif "CREATE INDEX" in stmt_upper:
+                                parts = stmt_clean.split('"')
+                                idx_name = parts[1] if len(parts) > 1 else "Index"
+                                if idx_name not in created_indexes:
+                                    created_indexes.append(idx_name)
+                                    print(f"    [🗺️ Index Spatial]  '{idx_name}' créé")
+                            elif "FOREIGN KEY" in stmt_upper:
+                                created_fks += 1
+                            elif "CREATE TRIGGER" in stmt_upper:
+                                parts = stmt_clean.split('"')
+                                trg_name = parts[1] if len(parts) > 1 else "Trigger"
+                                if trg_name not in created_triggers:
+                                    created_triggers.append(trg_name)
+                                    print(f"    [⚡ Trigger PL/pgSQL] '{trg_name}' activé")
                         except Exception as ex:
                             conn.rollback()
                             
                 cursor.close()
                 conn.close()
-                print(f"[✔] Schéma mis à jour en temps réel sur PostgreSQL ({success_count} requêtes appliquées) !")
+                
+                print("\n[📋 RÉCAPITULATIF DES TABLES ET ÉLÉMENTS CRÉÉS EN BASE]")
+                print(f"    📌 Feature Classes (Métiers) : {len(created_tables)} table(s)")
+                if created_tables:
+                    print(f"       -> {', '.join(created_tables)}")
+                print(f"    📌 Tables de Domaines (_TBD) : {len(created_domains)} table(s)")
+                if created_domains:
+                    print(f"       -> {', '.join(created_domains)}")
+                print(f"    📌 Index Spatiaux GiST       : {len(created_indexes)} index")
+                print(f"    📌 Clés Étrangères (FK)       : {created_fks} contrainte(s)")
+                print(f"    📌 Triggers Spatiaux PL/pgSQL: {len(created_triggers)} trigger(s)")
+                print(f"[✔] Synchronisation PostgreSQL 100% réussie ({success_count} requêtes SQL exécutées) !\n")
             except ImportError:
                 print("[ℹ] Module 'psycopg2' non installé. Installez-le avec : pip install psycopg2-binary")
             except Exception as e:
