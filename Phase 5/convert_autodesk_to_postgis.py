@@ -26,6 +26,12 @@ import sys
 import argparse
 from pathlib import Path
 
+# Force l'encodage UTF-8 pour la console Windows afin d'éviter les erreurs charmap
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+if hasattr(sys.stderr, "reconfigure"):
+    sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+
 # =============================================================================
 # 1. TABLEAU DE CORRESPONDANCE DES TYPES (FDO -> POSTGRESQL)
 # =============================================================================
