@@ -212,6 +212,55 @@ def find_autodesk_sqlite(search_dir: str = None, model_name: str = None) -> str:
     return latest_file
 
 
+def clean_postgres_db_name(name: str) -> str:
+    """
+    Nettoie et formate une chaîne pour être un nom de base de données PostgreSQL valide.
+    """
+    if not name:
+        return ""
+    import re
+    import unicodedata
+    
+    # Normalisation pour enlever les accents (ex: donné -> donne)
+    nfkd_form = unicodedata.normalize('NFKD', name)
+    only_ascii = nfkd_form.encode('ASCII', 'ignore').decode('ASCII')
+    
+    # Passage en minuscules
+    cleaned = only_ascii.lower()
+    # Remplacer tout caractère non-alphanumérique par des tirets bas
+    cleaned = re.sub(r'[^a-z0-9]+', '_', cleaned)
+    # Supprimer les tirets bas multiples ou en extrémités
+    cleaned = re.sub(r'_+', '_', cleaned).strip('_')
+    
+    return cleaned
+
+
+def get_industry_model_name(sqlite_path: str) -> str:
+    """
+    Lit le nom de l'Industry Model depuis la table système Autodesk 'TB_INFO'.
+    Retourne None si la table ou la clé 'DOCUMENT_NAME' n'existe pas.
+    """
+    try:
+        if not os.path.isfile(sqlite_path):
+            return None
+        conn = sqlite3.connect(sqlite_path, timeout=5.0)
+        cursor = conn.cursor()
+        # On vérifie d'abord si la table TB_INFO existe pour éviter d'élever une exception inutilement
+        cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='TB_INFO';")
+        if not cursor.fetchone():
+            conn.close()
+            return None
+        
+        cursor.execute("SELECT VALUE_CHAR FROM TB_INFO WHERE PARAM = 'DOCUMENT_NAME';")
+        row = cursor.fetchone()
+        conn.close()
+        if row and row[0]:
+            return row[0].strip()
+    except Exception as e:
+        print(f"[⚠️] Note lors de la récupération du nom du modèle (TB_INFO) : {e}")
+    return None
+
+
 def ensure_pg_database_exists(host="localhost", port=5432, user="postgres", password="", dbname="autocad_test"):
     """
     Vérifie si la base de données PostgreSQL existe, et la crée automatiquement si nécessaire.
@@ -256,10 +305,18 @@ def run_conversion_and_apply(sqlite_path: str, output_sql: str, pg_host="localho
     print(f"\n[⚡ AUTO-SYNC] Détection d'une modification dans {Path(sqlite_path).name} !")
     print(f"[⚙] Lancement automatique du convertisseur Python...")
     
-    # Si aucun nom de BDD n'est fourni, on prend le nom du fichier SQLite
+    # Si aucun nom de BDD n'est fourni, on tente de le récupérer depuis la table système Autodesk
     if not pg_db:
-        model_name = Path(sqlite_path).stem.lower().replace(" ", "_")
-        pg_db = model_name
+        model_name = get_industry_model_name(sqlite_path)
+        if model_name:
+            cleaned_db = clean_postgres_db_name(model_name)
+            if cleaned_db:
+                print(f"[⚙] Industry Model Autodesk détecté dans SQLite : '{model_name}' -> Base PostgreSQL cible : '{cleaned_db}'")
+                pg_db = cleaned_db
+            else:
+                pg_db = clean_postgres_db_name(Path(sqlite_path).stem)
+        else:
+            pg_db = clean_postgres_db_name(Path(sqlite_path).stem)
         
     script_dir = Path(__file__).parent
     converter_script = script_dir / "convert_autodesk_to_postgis.py"
@@ -382,8 +439,16 @@ def watch_file(sqlite_path: str, output_sql: str, pg_host="localhost", pg_port=5
     print("===================================================================")
     print(f"[👀] Surveillance active sur : {target_file.resolve()}")
     print(f"[⏱] Fréquence de contrôle : Toutes les {CHECK_INTERVAL_SECONDS} secondes.")
+    resolved_db = pg_db
+    if not resolved_db and target_file.exists():
+        model_name = get_industry_model_name(str(target_file))
+        if model_name:
+            resolved_db = clean_postgres_db_name(model_name)
+    if not resolved_db:
+        resolved_db = clean_postgres_db_name(target_file.stem)
+
     if pg_user and pg_pass:
-        print(f"[🗄] Mode : Génération DDL + Application auto sur PostgreSQL (BDD: {pg_db or target_file.stem.lower().replace(' ', '_')})")
+        print(f"[🗄] Mode : Génération DDL + Application auto sur PostgreSQL (BDD: {resolved_db})")
     else:
         print("[📄] Mode : Génération du fichier DDL uniquement (Passer --pg-user et --pg-pass pour l'application auto)")
     print("[Presser CTRL+C pour arrêter le service]\n")
