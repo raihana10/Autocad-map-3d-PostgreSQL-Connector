@@ -428,93 +428,201 @@ def run_conversion_and_apply(sqlite_path: str, output_sql: str, pg_host="localho
         print(f"[❌] Erreur lors de la conversion DDL : {result.stderr}")
 
 
-def watch_file(sqlite_path: str, output_sql: str, pg_host="localhost", pg_port=5432, pg_user=None, pg_pass=None, pg_db=None, srid: int = 2154, run_initial_sync: bool = False):
+def find_all_autodesk_sqlites(search_dir: str = None, model_name: str = None) -> list:
     """
-    Boucle de surveillance d'un fichier SQLite Autodesk avec support de redétection dynamique.
+    Parcourt le dossier temporaire (%TEMP% par défaut) et retourne TOUS les fichiers SQLite Autodesk valides.
+    Chaque modèle est associé à son nom propre et son nom de base PostgreSQL nettoyé.
     """
-    target_file = Path(sqlite_path)
+    base_dir = search_dir if search_dir else tempfile.gettempdir()
+    found_models = []
+    seen_paths = set()
     
+    for root, _, files in os.walk(base_dir):
+        for f in files:
+            if model_name and model_name.lower() not in f.lower() and model_name.lower() not in root.lower():
+                continue
+                
+            full_path = os.path.join(root, f)
+            if full_path in seen_paths:
+                continue
+                
+            if is_autodesk_sqlite(full_path):
+                seen_paths.add(full_path)
+                raw_name = get_industry_model_name(full_path)
+                if not raw_name:
+                    raw_name = Path(full_path).stem
+                    
+                db_name = clean_postgres_db_name(raw_name)
+                if not db_name:
+                    db_name = clean_postgres_db_name(Path(full_path).stem)
+                    
+                mtime = os.path.getmtime(full_path)
+                output_sql = f"schema_{db_name}.sql"
+                
+                found_models.append({
+                    "path": full_path,
+                    "model_name": raw_name,
+                    "db_name": db_name,
+                    "output_sql": output_sql,
+                    "mtime": mtime
+                })
+                
+    return found_models
+
+
+def watch_file(sqlite_path: str = None, search_dir: str = None, model_name: str = None, output_sql: str = None, pg_host="localhost", pg_port=5432, pg_user=None, pg_pass=None, pg_db=None, srid: int = 2154, run_initial_sync: bool = False):
+    """
+    Service de surveillance multi-modèles (Multi-Watcher) :
+    Surveille simultanément TOUS les Industry Models Autodesk actifs dans %TEMP% (ou un modèle cible).
+    Chaque modèle est synchronisé dans sa propre base PostgreSQL dédiée sans interférence.
+    """
     print("===================================================================")
-    print(" 🚀 SERVICE DE SURVEILLANCE AUTOMATIQUE DU DATA MODEL AUTODESK")
+    print(" 🚀 SERVICE DE SURVEILLANCE AUTOMATIQUE MULTI-MODÈLES AUTODESK")
     print("===================================================================")
-    print(f"[👀] Surveillance active sur : {target_file.resolve()}")
+    print(f"[🔍] Zone de surveillance : {search_dir or tempfile.gettempdir()}")
     print(f"[⏱] Fréquence de contrôle : Toutes les {CHECK_INTERVAL_SECONDS} secondes.")
-    resolved_db = pg_db
-    if not resolved_db and target_file.exists():
-        model_name = get_industry_model_name(str(target_file))
-        if model_name:
-            resolved_db = clean_postgres_db_name(model_name)
-    if not resolved_db:
-        resolved_db = clean_postgres_db_name(target_file.stem)
-
     if pg_user and pg_pass:
-        print(f"[🗄] Mode : Génération DDL + Application auto sur PostgreSQL (BDD: {resolved_db})")
+        print("[🗄] Mode : Génération DDL + Application auto sur PostgreSQL (Bases dédiées par modèle)")
     else:
-        print("[📄] Mode : Génération du fichier DDL uniquement (Passer --pg-user et --pg-pass pour l'application auto)")
+        print("[📄] Mode : Génération des fichiers DDL uniquement")
     print("[Presser CTRL+C pour arrêter le service]\n")
-    
-    last_mtime = target_file.stat().st_mtime if target_file.exists() else 0
 
-    if run_initial_sync and target_file.exists():
-        run_conversion_and_apply(str(target_file), output_sql, pg_host, pg_port, pg_user, pg_pass, pg_db, srid)
+    monitored = {}  # db_name -> { "path": ..., "mtime": ..., "output_sql": ... }
     
+    # Premier passage de détection
+    if sqlite_path and os.path.exists(sqlite_path):
+        raw_name = get_industry_model_name(sqlite_path) or Path(sqlite_path).stem
+        target_db = pg_db or clean_postgres_db_name(raw_name)
+        out_sql = output_sql or f"schema_{target_db}.sql"
+        initial_list = [{
+            "path": sqlite_path,
+            "model_name": raw_name,
+            "db_name": target_db,
+            "output_sql": out_sql,
+            "mtime": os.path.getmtime(sqlite_path)
+        }]
+    else:
+        initial_list = find_all_autodesk_sqlites(search_dir=search_dir, model_name=model_name)
+        
+    if not initial_list:
+        print("[⚠️] Aucun Industry Model Autodesk actif trouvé pour le moment.")
+        print("[👀] Le service reste en attente de l'ouverture d'un Data Model...\n")
+
+    for m in initial_list:
+        db = m["db_name"]
+        print(f"[📍 INDUSTRY MODEL DÉTECTÉ] '{m['model_name']}'")
+        print(f"    ├─ SQLite source   : {m['path']}")
+        print(f"    ├─ Base PostgreSQL : '{db}'")
+        print(f"    └─ Fichier DDL     : '{m['output_sql']}'\n")
+        
+        monitored[db] = {
+            "path": m["path"],
+            "mtime": m["mtime"],
+            "output_sql": m["output_sql"]
+        }
+        
+        if run_initial_sync:
+            run_conversion_and_apply(
+                sqlite_path=m["path"],
+                output_sql=m["output_sql"],
+                pg_host=pg_host,
+                pg_port=pg_port,
+                pg_user=pg_user,
+                pg_pass=pg_pass,
+                pg_db=db,
+                srid=srid
+            )
+            
     try:
         while True:
             time.sleep(CHECK_INTERVAL_SECONDS)
-            if target_file.exists():
-                current_mtime = target_file.stat().st_mtime
-                if current_mtime != last_mtime:
-                    last_mtime = current_mtime
-                    run_conversion_and_apply(str(target_file), output_sql, pg_host, pg_port, pg_user, pg_pass, pg_db, srid)
+            
+            if sqlite_path and os.path.exists(sqlite_path):
+                raw_name = get_industry_model_name(sqlite_path) or Path(sqlite_path).stem
+                target_db = pg_db or clean_postgres_db_name(raw_name)
+                out_sql = output_sql or f"schema_{target_db}.sql"
+                active_models = [{
+                    "path": sqlite_path,
+                    "model_name": raw_name,
+                    "db_name": target_db,
+                    "output_sql": out_sql,
+                    "mtime": os.path.getmtime(sqlite_path)
+                }]
             else:
-                # Si le fichier s'est déplacé/a changé de GUID dans Temp, effectuer une nouvelle détection
-                found = find_autodesk_sqlite()
-                if found:
-                    print(f"[🔄] Nouveau fichier détecté : {found}")
-                    target_file = Path(found)
-                    last_mtime = target_file.stat().st_mtime
-                    run_conversion_and_apply(str(target_file), output_sql, pg_host, pg_port, pg_user, pg_pass, pg_db, srid)
+                active_models = find_all_autodesk_sqlites(search_dir=search_dir, model_name=model_name)
+                
+            for m in active_models:
+                db = m["db_name"]
+                fpath = m["path"]
+                curr_mtime = m["mtime"]
+                out_sql = m["output_sql"]
+                
+                # Nouveau modèle ouvert dans Autodesk pendant l'exécution
+                if db not in monitored:
+                    print(f"\n[🆕 NOUVEAU DATA MODEL DÉTECTÉ] '{m['model_name']}'")
+                    print(f"    ├─ SQLite source   : {fpath}")
+                    print(f"    ├─ Base PostgreSQL : '{db}'")
+                    print(f"    └─ Fichier DDL     : '{out_sql}'")
+                    
+                    monitored[db] = {
+                        "path": fpath,
+                        "mtime": curr_mtime,
+                        "output_sql": out_sql
+                    }
+                    
+                    run_conversion_and_apply(
+                        sqlite_path=fpath,
+                        output_sql=out_sql,
+                        pg_host=pg_host,
+                        pg_port=pg_port,
+                        pg_user=pg_user,
+                        pg_pass=pg_pass,
+                        pg_db=db,
+                        srid=srid
+                    )
+                # Modèle existant qui a été modifié par l'utilisateur
+                elif curr_mtime != monitored[db]["mtime"]:
+                    monitored[db]["mtime"] = curr_mtime
+                    run_conversion_and_apply(
+                        sqlite_path=fpath,
+                        output_sql=out_sql,
+                        pg_host=pg_host,
+                        pg_port=pg_port,
+                        pg_user=pg_user,
+                        pg_pass=pg_pass,
+                        pg_db=db,
+                        srid=srid
+                    )
     except KeyboardInterrupt:
-        print("\n[⏹] Arrêt du service de surveillance automatique.")
+        print("\n[⏹] Arrêt du service de surveillance automatique multi-modèles.")
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(
-        description="Surveille un Data Model Autodesk et applique automatiquement le DDL dans PostgreSQL."
+        description="Surveille un ou plusieurs Data Models Autodesk et applique automatiquement le DDL dans PostgreSQL."
     )
-    parser.add_argument("--db", dest="sqlite_file", default=None, help="Chemin explicite vers le fichier Data Model SQLite (optionnel)")
+    parser.add_argument("--db", dest="sqlite_file", default=None, help="Chemin explicite vers un fichier Data Model SQLite (optionnel)")
     parser.add_argument("--dir", dest="search_dir", default=None, help="Dossier racine pour la recherche générale (def: %%TEMP%%)")
-    parser.add_argument("--name", dest="model_name", default=None, help="Nom de l'Industry Model à rechercher")
-    parser.add_argument("--out", dest="output_sql", default="schema_postgis_autosync.sql", help="Fichier SQL généré")
+    parser.add_argument("--name", dest="model_name", default=None, help="Nom de l'Industry Model spécifique à rechercher (optionnel)")
+    parser.add_argument("--out", dest="output_sql", default=None, help="Fichier SQL généré (def: schema_<dbname>.sql)")
     
     # Paramètres PostgreSQL
     parser.add_argument("--pg-host", dest="pg_host", default="localhost", help="Hôte du serveur PostgreSQL (def: localhost)")
     parser.add_argument("--pg-port", dest="pg_port", type=int, default=5432, help="Port PostgreSQL (def: 5432)")
     parser.add_argument("--pg-user", dest="pg_user", default=os.getenv("PG_USER"), help="Nom d'utilisateur PostgreSQL (ex: postgres)")
     parser.add_argument("--pg-pass", dest="pg_pass", default=os.getenv("PG_PASSWORD"), help="Mot de passe PostgreSQL")
-    parser.add_argument("--pg-db", dest="pg_db", default=None, help="Nom de la BDD PostgreSQL cible (def: auto-déduit du nom du fichier SQLite)")
+    parser.add_argument("--pg-db", dest="pg_db", default=None, help="Nom de la BDD PostgreSQL cible (optionnel)")
     
     parser.add_argument("--srid", type=int, default=2154, help="Code EPSG / SRID spatial PostGIS (def: 2154)")
     parser.add_argument("--initial-sync", action="store_true", help="Exécute une synchronisation immédiate au démarrage.")
 
     args = parser.parse_args()
 
-    sqlite_target = args.sqlite_file
-    
-    # Recherche générale si aucun chemin direct n'est fourni ou si le fichier fourni n'existe pas
-    if not sqlite_target or not os.path.exists(sqlite_target):
-        print("[ℹ] Aucun chemin fixe valide fourni. Lancement de la recherche générale...")
-        sqlite_target = find_autodesk_sqlite(search_dir=args.search_dir, model_name=args.model_name)
-        
-    if not sqlite_target:
-        print("[❌] Aucun fichier Data Model Autodesk valide trouvé dans le système.", file=sys.stderr)
-        sys.exit(1)
-
-    print(f"[✔] Data Model identifié : {sqlite_target}")
-
     watch_file(
-        sqlite_target,
-        args.output_sql,
+        sqlite_path=args.sqlite_file,
+        search_dir=args.search_dir,
+        model_name=args.model_name,
+        output_sql=args.output_sql,
         pg_host=args.pg_host,
         pg_port=args.pg_port,
         pg_user=args.pg_user,
