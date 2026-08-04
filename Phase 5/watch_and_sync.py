@@ -162,10 +162,17 @@ def is_autodesk_sqlite(file_path: str) -> bool:
     """
     Vérifie si un fichier SQLite est un Data Model Autodesk valide
     en contrôlant la présence de la table système 'TB_DICTIONARY'.
+    Exclut les fichiers système internes d'Autodesk comme 'EmbeddedTbsys.sqlite'.
     """
     try:
         if not os.path.isfile(file_path):
             return False
+            
+        fname = Path(file_path).name.lower()
+        # Exclusion des fichiers systèmes Autodesk non-métiers
+        if "tbsys" in fname or "system" in fname:
+            return False
+            
         conn = sqlite3.connect(file_path)
         cursor = conn.cursor()
         cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='TB_DICTIONARY';")
@@ -305,7 +312,7 @@ def run_conversion_and_apply(sqlite_path: str, output_sql: str, pg_host="localho
     print(f"\n[⚡ AUTO-SYNC] Détection d'une modification dans {Path(sqlite_path).name} !")
     print(f"[⚙] Lancement automatique du convertisseur Python...")
     
-    # Si aucun nom de BDD n'est fourni, on tente de le récupérer depuis la table système Autodesk
+    # Si aucun nom de BDD n'est fourni, on tente de le récupérer depuis le nom de fichier ou la table système
     if not pg_db:
         model_name = get_industry_model_name(sqlite_path)
         if model_name:
@@ -431,11 +438,12 @@ def run_conversion_and_apply(sqlite_path: str, output_sql: str, pg_host="localho
 def find_all_autodesk_sqlites(search_dir: str = None, model_name: str = None) -> list:
     """
     Parcourt le dossier temporaire (%TEMP% par défaut) et retourne TOUS les fichiers SQLite Autodesk valides.
-    Chaque modèle est associé à son nom propre et son nom de base PostgreSQL nettoyé.
+    Chaque modèle est associé à un nom de base PostgreSQL unique et propre.
     """
     base_dir = search_dir if search_dir else tempfile.gettempdir()
     found_models = []
     seen_paths = set()
+    used_db_names = {}  # db_name -> count pour déduplication
     
     for root, _, files in os.walk(base_dir):
         for f in files:
@@ -448,13 +456,32 @@ def find_all_autodesk_sqlites(search_dir: str = None, model_name: str = None) ->
                 
             if is_autodesk_sqlite(full_path):
                 seen_paths.add(full_path)
-                raw_name = get_industry_model_name(full_path)
-                if not raw_name:
-                    raw_name = Path(full_path).stem
+                
+                # Priorité au nom de fichier du Data Model (stem) pour la lisibilité
+                file_stem = Path(full_path).stem
+                
+                # Si le nom de fichier est trop générique ("Drawing1", "datamodel"), déduire du dossier ou TB_INFO
+                if file_stem.lower().startswith("drawing") or file_stem.lower() == "datamodel":
+                    doc_name = get_industry_model_name(full_path)
+                    if doc_name and doc_name.lower() != "industry model 1":
+                        raw_name = doc_name
+                    else:
+                        # Utiliser le nom du dossier GUID parent
+                        parent_name = Path(full_path).parent.name
+                        raw_name = f"{file_stem}_{parent_name[:6]}"
+                else:
+                    raw_name = file_stem
                     
                 db_name = clean_postgres_db_name(raw_name)
                 if not db_name:
-                    db_name = clean_postgres_db_name(Path(full_path).stem)
+                    db_name = "industry_model"
+                    
+                # Déduplication des noms de BDD si deux fichiers physiques génèrent le même nom
+                if db_name in used_db_names:
+                    used_db_names[db_name] += 1
+                    db_name = f"{db_name}_{used_db_names[db_name]}"
+                else:
+                    used_db_names[db_name] = 1
                     
                 mtime = os.path.getmtime(full_path)
                 output_sql = f"schema_{db_name}.sql"
@@ -487,11 +514,12 @@ def watch_file(sqlite_path: str = None, search_dir: str = None, model_name: str 
         print("[📄] Mode : Génération des fichiers DDL uniquement")
     print("[Presser CTRL+C pour arrêter le service]\n")
 
-    monitored = {}  # db_name -> { "path": ..., "mtime": ..., "output_sql": ... }
+    # Indexé par CHEMIN ABSOLU DE FICHIER (full_path) -> pas de conflit ni de boucle infinie !
+    monitored = {}  # full_path -> { "db_name": ..., "mtime": ..., "output_sql": ... }
     
     # Premier passage de détection
     if sqlite_path and os.path.exists(sqlite_path):
-        raw_name = get_industry_model_name(sqlite_path) or Path(sqlite_path).stem
+        raw_name = Path(sqlite_path).stem
         target_db = pg_db or clean_postgres_db_name(raw_name)
         out_sql = output_sql or f"schema_{target_db}.sql"
         initial_list = [{
@@ -509,21 +537,22 @@ def watch_file(sqlite_path: str = None, search_dir: str = None, model_name: str 
         print("[👀] Le service reste en attente de l'ouverture d'un Data Model...\n")
 
     for m in initial_list:
+        fpath = m["path"]
         db = m["db_name"]
         print(f"[📍 INDUSTRY MODEL DÉTECTÉ] '{m['model_name']}'")
-        print(f"    ├─ SQLite source   : {m['path']}")
+        print(f"    ├─ SQLite source   : {fpath}")
         print(f"    ├─ Base PostgreSQL : '{db}'")
         print(f"    └─ Fichier DDL     : '{m['output_sql']}'\n")
         
-        monitored[db] = {
-            "path": m["path"],
+        monitored[fpath] = {
+            "db_name": db,
             "mtime": m["mtime"],
             "output_sql": m["output_sql"]
         }
         
         if run_initial_sync:
             run_conversion_and_apply(
-                sqlite_path=m["path"],
+                sqlite_path=fpath,
                 output_sql=m["output_sql"],
                 pg_host=pg_host,
                 pg_port=pg_port,
@@ -538,7 +567,7 @@ def watch_file(sqlite_path: str = None, search_dir: str = None, model_name: str 
             time.sleep(CHECK_INTERVAL_SECONDS)
             
             if sqlite_path and os.path.exists(sqlite_path):
-                raw_name = get_industry_model_name(sqlite_path) or Path(sqlite_path).stem
+                raw_name = Path(sqlite_path).stem
                 target_db = pg_db or clean_postgres_db_name(raw_name)
                 out_sql = output_sql or f"schema_{target_db}.sql"
                 active_models = [{
@@ -552,20 +581,20 @@ def watch_file(sqlite_path: str = None, search_dir: str = None, model_name: str 
                 active_models = find_all_autodesk_sqlites(search_dir=search_dir, model_name=model_name)
                 
             for m in active_models:
-                db = m["db_name"]
                 fpath = m["path"]
+                db = m["db_name"]
                 curr_mtime = m["mtime"]
                 out_sql = m["output_sql"]
                 
-                # Nouveau modèle ouvert dans Autodesk pendant l'exécution
-                if db not in monitored:
+                # Nouveau fichier SQLite découvert pendant l'exécution
+                if fpath not in monitored:
                     print(f"\n[🆕 NOUVEAU DATA MODEL DÉTECTÉ] '{m['model_name']}'")
                     print(f"    ├─ SQLite source   : {fpath}")
                     print(f"    ├─ Base PostgreSQL : '{db}'")
                     print(f"    └─ Fichier DDL     : '{out_sql}'")
                     
-                    monitored[db] = {
-                        "path": fpath,
+                    monitored[fpath] = {
+                        "db_name": db,
                         "mtime": curr_mtime,
                         "output_sql": out_sql
                     }
@@ -580,9 +609,9 @@ def watch_file(sqlite_path: str = None, search_dir: str = None, model_name: str 
                         pg_db=db,
                         srid=srid
                     )
-                # Modèle existant qui a été modifié par l'utilisateur
-                elif curr_mtime != monitored[db]["mtime"]:
-                    monitored[db]["mtime"] = curr_mtime
+                # Modèle existant physiquement qui a été modifié par l'utilisateur
+                elif curr_mtime != monitored[fpath]["mtime"]:
+                    monitored[fpath]["mtime"] = curr_mtime
                     run_conversion_and_apply(
                         sqlite_path=fpath,
                         output_sql=out_sql,
