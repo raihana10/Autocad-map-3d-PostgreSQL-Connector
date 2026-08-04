@@ -158,22 +158,56 @@ def split_sql_statements(sql_content: str):
     return statements
 
 
+# Extensions qui ne peuvent jamais être un SQLite Autodesk -> rejet immédiat sans lecture
+_NON_SQLITE_EXTS = {
+    ".txt", ".log", ".png", ".jpg", ".jpeg", ".gif", ".bmp", ".ico",
+    ".xml", ".json", ".html", ".htm", ".css", ".js", ".ts",
+    ".dll", ".exe", ".msi", ".bat", ".cmd", ".ps1", ".sh",
+    ".zip", ".rar", ".7z", ".gz", ".tar", ".cab",
+    ".pdf", ".doc", ".docx", ".xls", ".xlsx", ".ppt", ".pptx",
+    ".py", ".pyo", ".pyc", ".ini", ".cfg", ".yaml", ".toml",
+    ".dwg", ".dxf", ".bak", ".dat", ".db-wal", ".db-shm",
+    ".tmp", ".temp", ".lock", ".pid",
+}
+
+# Signature magique de tout fichier SQLite3 (16 premiers octets)
+_SQLITE_MAGIC = b"SQLite format 3\x00"
+
+
 def is_autodesk_sqlite(file_path: str) -> bool:
     """
-    Vérifie si un fichier SQLite est un Data Model Autodesk valide
-    en contrôlant la présence de la table système 'TB_DICTIONARY'.
-    Exclut les fichiers système internes d'Autodesk comme 'EmbeddedTbsys.sqlite'.
+    Vérifie si un fichier SQLite est un Data Model Autodesk valide.
+    Utilise une validation en 3 niveaux pour être ultra-rapide :
+      1. Exclusion immédiate par extension connue non-SQLite
+      2. Exclusion des fichiers systèmes Autodesk (tbsys, system)
+      3. Lecture des 16 octets de signature SQLite (magic header)
+      4. Connexion SQLite pour vérifier la table TB_DICTIONARY
     """
     try:
         if not os.path.isfile(file_path):
             return False
-            
+
+        # Niveau 1 : exclusion par extension (0,001 ms)
+        ext = Path(file_path).suffix.lower()
+        if ext in _NON_SQLITE_EXTS:
+            return False
+
+        # Niveau 2 : exclusion des fichiers système Autodesk
         fname = Path(file_path).name.lower()
-        # Exclusion des fichiers systèmes Autodesk non-métiers
         if "tbsys" in fname or "system" in fname:
             return False
-            
-        conn = sqlite3.connect(file_path)
+
+        # Niveau 3 : lecture des 16 octets magiques SQLite (0,01 ms)
+        try:
+            with open(file_path, "rb") as f:
+                header = f.read(16)
+            if header != _SQLITE_MAGIC:
+                return False
+        except (OSError, PermissionError):
+            return False
+
+        # Niveau 4 : vérification de la table TB_DICTIONARY (unique aux Data Models Autodesk)
+        conn = sqlite3.connect(file_path, timeout=2.0)
         cursor = conn.cursor()
         cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='TB_DICTIONARY';")
         has_tb_dict = cursor.fetchone() is not None
@@ -563,9 +597,13 @@ def watch_file(sqlite_path: str = None, search_dir: str = None, model_name: str 
             )
             
     try:
+        heartbeat_counter = 0
+        HEARTBEAT_EVERY = 5  # Affiche un message de statut toutes les N itérations (~10s)
+
         while True:
             time.sleep(CHECK_INTERVAL_SECONDS)
-            
+            heartbeat_counter += 1
+
             if sqlite_path and os.path.exists(sqlite_path):
                 raw_name = Path(sqlite_path).stem
                 target_db = pg_db or clean_postgres_db_name(raw_name)
@@ -579,26 +617,28 @@ def watch_file(sqlite_path: str = None, search_dir: str = None, model_name: str 
                 }]
             else:
                 active_models = find_all_autodesk_sqlites(search_dir=search_dir, model_name=model_name)
-                
+
+            any_change = False
             for m in active_models:
                 fpath = m["path"]
                 db = m["db_name"]
                 curr_mtime = m["mtime"]
                 out_sql = m["output_sql"]
-                
+
                 # Nouveau fichier SQLite découvert pendant l'exécution
                 if fpath not in monitored:
+                    any_change = True
                     print(f"\n[🆕 NOUVEAU DATA MODEL DÉTECTÉ] '{m['model_name']}'")
                     print(f"    ├─ SQLite source   : {fpath}")
                     print(f"    ├─ Base PostgreSQL : '{db}'")
                     print(f"    └─ Fichier DDL     : '{out_sql}'")
-                    
+
                     monitored[fpath] = {
                         "db_name": db,
                         "mtime": curr_mtime,
                         "output_sql": out_sql
                     }
-                    
+
                     run_conversion_and_apply(
                         sqlite_path=fpath,
                         output_sql=out_sql,
@@ -611,6 +651,7 @@ def watch_file(sqlite_path: str = None, search_dir: str = None, model_name: str 
                     )
                 # Modèle existant physiquement qui a été modifié par l'utilisateur
                 elif curr_mtime != monitored[fpath]["mtime"]:
+                    any_change = True
                     monitored[fpath]["mtime"] = curr_mtime
                     run_conversion_and_apply(
                         sqlite_path=fpath,
@@ -622,6 +663,13 @@ def watch_file(sqlite_path: str = None, search_dir: str = None, model_name: str 
                         pg_db=db,
                         srid=srid
                     )
+
+            # Heartbeat : log de présence toutes les N secondes si aucune modification
+            if not any_change and heartbeat_counter >= HEARTBEAT_EVERY:
+                heartbeat_counter = 0
+                ts = time.strftime("%H:%M:%S")
+                print(f"[👀 {ts}] Surveillance active — {len(monitored)} modèle(s) en observation. En attente de modifications...")
+
     except KeyboardInterrupt:
         print("\n[⏹] Arrêt du service de surveillance automatique multi-modèles.")
 
