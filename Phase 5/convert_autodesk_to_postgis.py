@@ -26,6 +26,12 @@ import sys
 import argparse
 from pathlib import Path
 
+# Force l'encodage UTF-8 pour la console Windows afin d'éviter les erreurs charmap
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+if hasattr(sys.stderr, "reconfigure"):
+    sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+
 # =============================================================================
 # 1. TABLEAU DE CORRESPONDANCE DES TYPES (FDO -> POSTGRESQL)
 # =============================================================================
@@ -335,12 +341,23 @@ def generate_postgis_ddl(sqlite_path: str, default_srid: int = 2154) -> str:
         class_type = class_info["type"]
         caption = class_info["caption"]
         
+        # Ignorer les tables de domaine déjà créées dans la section A
+        if tbl_name in domain_tables or tbl_name.upper().endswith("_TBD"):
+            continue
+            
         cursor = conn.cursor()
-        cursor.execute(f"SELECT name FROM sqlite_master WHERE type='table' AND name='{tbl_name}';")
-        if not cursor.fetchone():
+        cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND LOWER(name) = LOWER(?);", (tbl_name,))
+        row = cursor.fetchone()
+        
+        if row:
+            real_tbl_name = row[0]
+            phys_cols = get_physical_column_info(conn, real_tbl_name)
+        else:
+            phys_cols = {}
+            
+        if not phys_cols:
             continue
         
-        phys_cols = get_physical_column_info(conn, tbl_name)
         tbl_spatial = spatial_meta.get(tbl_name.upper(), {})
         
         ddl_lines.append(f"-- ------------------------------------------------------------")
@@ -425,6 +442,20 @@ def generate_postgis_ddl(sqlite_path: str, default_srid: int = 2154) -> str:
             parent = rel["parent"]
             child = rel["child"]
             fk_col = rel["fk_col"]
+            
+            # Vérifier si la table enfant et la colonne FK existent réellement en base
+            child_cols = get_physical_column_info(conn, child)
+            if not child_cols:
+                # Essayer la recherche casse-insensible de la table
+                cursor = conn.cursor()
+                cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND LOWER(name) = LOWER(?);", (child,))
+                row = cursor.fetchone()
+                if row:
+                    child_cols = get_physical_column_info(conn, row[0])
+                    
+            if not child_cols or fk_col.upper() not in child_cols:
+                continue
+                
             fk_constraint_name = f"fk_{child}_{fk_col}_{parent}"
             # Détecte dynamiquement la PK de la table parente (FID pour classes, ID pour domaines)
             parent_pk = get_pk_column_name(conn, parent)
