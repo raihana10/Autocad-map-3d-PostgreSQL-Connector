@@ -45,6 +45,119 @@ if hasattr(sys.stderr, "reconfigure"):
 CHECK_INTERVAL_SECONDS = 2
 
 
+def split_sql_statements(sql_content: str):
+    """
+    Découpe un script SQL en instructions exécutables sans casser :
+    - les commentaires SQL (`--` et `/* ... */`)
+    - les chaînes simples / identifiants quotés
+    - les blocs PL/pgSQL délimités par $$ ... $$ ou $tag$ ... $tag$
+    """
+    statements = []
+    buffer = []
+    i = 0
+    length = len(sql_content)
+    in_single = False
+    in_double = False
+    in_line_comment = False
+    in_block_comment = False
+    dollar_tag = None
+
+    while i < length:
+        ch = sql_content[i]
+        nxt = sql_content[i + 1] if i + 1 < length else ""
+
+        if in_line_comment:
+            if ch == "\n":
+                in_line_comment = False
+            i += 1
+            continue
+
+        if in_block_comment:
+            if ch == "*" and nxt == "/":
+                in_block_comment = False
+                i += 2
+            else:
+                i += 1
+            continue
+
+        if dollar_tag is not None:
+            if sql_content.startswith(dollar_tag, i):
+                buffer.append(dollar_tag)
+                i += len(dollar_tag)
+                dollar_tag = None
+            else:
+                buffer.append(ch)
+                i += 1
+            continue
+
+        if in_single:
+            buffer.append(ch)
+            if ch == "'" and nxt == "'":
+                buffer.append(nxt)
+                i += 2
+                continue
+            if ch == "'":
+                in_single = False
+            i += 1
+            continue
+
+        if in_double:
+            buffer.append(ch)
+            if ch == '"':
+                in_double = False
+            i += 1
+            continue
+
+        if ch == "-" and nxt == "-":
+            in_line_comment = True
+            i += 2
+            continue
+
+        if ch == "/" and nxt == "*":
+            in_block_comment = True
+            i += 2
+            continue
+
+        if ch == "'":
+            in_single = True
+            buffer.append(ch)
+            i += 1
+            continue
+
+        if ch == '"':
+            in_double = True
+            buffer.append(ch)
+            i += 1
+            continue
+
+        if ch == "$":
+            end = sql_content.find("$", i + 1)
+            if end != -1:
+                candidate = sql_content[i:end + 1]
+                if all(c.isalnum() or c == "_" or c == "$" for c in candidate):
+                    dollar_tag = candidate
+                    buffer.append(candidate)
+                    i = end + 1
+                    continue
+
+        if ch == ";":
+            stmt = "".join(buffer).strip()
+            if stmt:
+                statements.append(stmt)
+            buffer = []
+            i += 1
+            continue
+
+        buffer.append(ch)
+        i += 1
+
+    tail = "".join(buffer).strip()
+    if tail:
+        statements.append(tail)
+
+    return statements
+
+
 def is_autodesk_sqlite(file_path: str) -> bool:
     """
     Vérifie si un fichier SQLite est un Data Model Autodesk valide
@@ -99,6 +212,55 @@ def find_autodesk_sqlite(search_dir: str = None, model_name: str = None) -> str:
     return latest_file
 
 
+def clean_postgres_db_name(name: str) -> str:
+    """
+    Nettoie et formate une chaîne pour être un nom de base de données PostgreSQL valide.
+    """
+    if not name:
+        return ""
+    import re
+    import unicodedata
+    
+    # Normalisation pour enlever les accents (ex: donné -> donne)
+    nfkd_form = unicodedata.normalize('NFKD', name)
+    only_ascii = nfkd_form.encode('ASCII', 'ignore').decode('ASCII')
+    
+    # Passage en minuscules
+    cleaned = only_ascii.lower()
+    # Remplacer tout caractère non-alphanumérique par des tirets bas
+    cleaned = re.sub(r'[^a-z0-9]+', '_', cleaned)
+    # Supprimer les tirets bas multiples ou en extrémités
+    cleaned = re.sub(r'_+', '_', cleaned).strip('_')
+    
+    return cleaned
+
+
+def get_industry_model_name(sqlite_path: str) -> str:
+    """
+    Lit le nom de l'Industry Model depuis la table système Autodesk 'TB_INFO'.
+    Retourne None si la table ou la clé 'DOCUMENT_NAME' n'existe pas.
+    """
+    try:
+        if not os.path.isfile(sqlite_path):
+            return None
+        conn = sqlite3.connect(sqlite_path, timeout=5.0)
+        cursor = conn.cursor()
+        # On vérifie d'abord si la table TB_INFO existe pour éviter d'élever une exception inutilement
+        cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='TB_INFO';")
+        if not cursor.fetchone():
+            conn.close()
+            return None
+        
+        cursor.execute("SELECT VALUE_CHAR FROM TB_INFO WHERE PARAM = 'DOCUMENT_NAME';")
+        row = cursor.fetchone()
+        conn.close()
+        if row and row[0]:
+            return row[0].strip()
+    except Exception as e:
+        print(f"[⚠️] Note lors de la récupération du nom du modèle (TB_INFO) : {e}")
+    return None
+
+
 def ensure_pg_database_exists(host="localhost", port=5432, user="postgres", password="", dbname="autocad_test"):
     """
     Vérifie si la base de données PostgreSQL existe, et la crée automatiquement si nécessaire.
@@ -143,10 +305,18 @@ def run_conversion_and_apply(sqlite_path: str, output_sql: str, pg_host="localho
     print(f"\n[⚡ AUTO-SYNC] Détection d'une modification dans {Path(sqlite_path).name} !")
     print(f"[⚙] Lancement automatique du convertisseur Python...")
     
-    # Si aucun nom de BDD n'est fourni, on prend le nom du fichier SQLite
+    # Si aucun nom de BDD n'est fourni, on tente de le récupérer depuis la table système Autodesk
     if not pg_db:
-        model_name = Path(sqlite_path).stem.lower().replace(" ", "_")
-        pg_db = model_name
+        model_name = get_industry_model_name(sqlite_path)
+        if model_name:
+            cleaned_db = clean_postgres_db_name(model_name)
+            if cleaned_db:
+                print(f"[⚙] Industry Model Autodesk détecté dans SQLite : '{model_name}' -> Base PostgreSQL cible : '{cleaned_db}'")
+                pg_db = cleaned_db
+            else:
+                pg_db = clean_postgres_db_name(Path(sqlite_path).stem)
+        else:
+            pg_db = clean_postgres_db_name(Path(sqlite_path).stem)
         
     script_dir = Path(__file__).parent
     converter_script = script_dir / "convert_autodesk_to_postgis.py"
@@ -186,46 +356,49 @@ def run_conversion_and_apply(sqlite_path: str, output_sql: str, pg_host="localho
                 created_indexes = []
                 created_fks = 0
                 created_triggers = []
+                failed_statements = []
                 
                 print("\n[📊 DÉBUT D'APPLICATION DU SCHÉMA EN BASE POSTGRESQL]")
                 
-                for stmt in sql_content.split(";"):
-                    stmt_clean = stmt.strip()
-                    if stmt_clean and not stmt_clean.startswith("--"):
-                        stmt_upper = stmt_clean.upper()
-                        try:
-                            cursor.execute(stmt_clean + ";")
-                            conn.commit()
-                            success_count += 1
-                            
-                            # Détection du type de requête pour affichage détaillé
-                            if "CREATE TABLE IF NOT EXISTS" in stmt_upper or "CREATE TABLE" in stmt_upper:
-                                parts = stmt_clean.split('"')
-                                tname = parts[1] if len(parts) > 1 else "Table"
-                                if tname.endswith("_TBD") or tname == "TB_DOMAIN":
-                                    if tname not in created_domains:
-                                        created_domains.append(tname)
-                                        print(f"    [📦 Table Domaine]  '{tname}' créée")
-                                else:
-                                    if tname not in created_tables:
-                                        created_tables.append(tname)
-                                        print(f"    [✨ Feature Class]  '{tname}' créée")
-                            elif "CREATE INDEX" in stmt_upper:
-                                parts = stmt_clean.split('"')
-                                idx_name = parts[1] if len(parts) > 1 else "Index"
-                                if idx_name not in created_indexes:
-                                    created_indexes.append(idx_name)
-                                    print(f"    [🗺️ Index Spatial]  '{idx_name}' créé")
-                            elif "FOREIGN KEY" in stmt_upper:
-                                created_fks += 1
-                            elif "CREATE TRIGGER" in stmt_upper:
-                                parts = stmt_clean.split('"')
-                                trg_name = parts[1] if len(parts) > 1 else "Trigger"
-                                if trg_name not in created_triggers:
-                                    created_triggers.append(trg_name)
-                                    print(f"    [⚡ Trigger PL/pgSQL] '{trg_name}' activé")
-                        except Exception as ex:
-                            conn.rollback()
+                for stmt_clean in split_sql_statements(sql_content):
+                    stmt_upper = stmt_clean.upper()
+                    try:
+                        cursor.execute(stmt_clean + ";")
+                        conn.commit()
+                        success_count += 1
+
+                        # Détection du type de requête pour affichage détaillé
+                        if "CREATE TABLE IF NOT EXISTS" in stmt_upper or "CREATE TABLE" in stmt_upper:
+                            parts = stmt_clean.split('"')
+                            tname = parts[1] if len(parts) > 1 else "Table"
+                            if tname.endswith("_TBD") or tname == "TB_DOMAIN":
+                                if tname not in created_domains:
+                                    created_domains.append(tname)
+                                    print(f"    [📦 Table Domaine]  '{tname}' créée")
+                            else:
+                                if tname not in created_tables:
+                                    created_tables.append(tname)
+                                    print(f"    [✨ Feature Class]  '{tname}' créée")
+                        elif "CREATE INDEX" in stmt_upper:
+                            parts = stmt_clean.split('"')
+                            idx_name = parts[1] if len(parts) > 1 else "Index"
+                            if idx_name not in created_indexes:
+                                created_indexes.append(idx_name)
+                                print(f"    [🗺️ Index Spatial]  '{idx_name}' créé")
+                        elif "FOREIGN KEY" in stmt_upper:
+                            created_fks += 1
+                        elif "CREATE TRIGGER" in stmt_upper:
+                            parts = stmt_clean.split('"')
+                            trg_name = parts[1] if len(parts) > 1 else "Trigger"
+                            if trg_name not in created_triggers:
+                                created_triggers.append(trg_name)
+                                print(f"    [⚡ Trigger PL/pgSQL] '{trg_name}' activé")
+                    except Exception as ex:
+                        conn.rollback()
+                        first_line = stmt_clean.splitlines()[0][:120]
+                        failed_statements.append((first_line, str(ex)))
+                        print(f"    [❌ SQL] {first_line}")
+                        print(f"         -> {ex}")
                             
                 cursor.close()
                 conn.close()
@@ -240,7 +413,11 @@ def run_conversion_and_apply(sqlite_path: str, output_sql: str, pg_host="localho
                 print(f"    📌 Index Spatiaux GiST       : {len(created_indexes)} index")
                 print(f"    📌 Clés Étrangères (FK)       : {created_fks} contrainte(s)")
                 print(f"    📌 Triggers Spatiaux PL/pgSQL: {len(created_triggers)} trigger(s)")
-                print(f"[✔] Synchronisation PostgreSQL 100% réussie ({success_count} requêtes SQL exécutées) !\n")
+                if failed_statements:
+                    print(f"    📌 Requêtes en échec          : {len(failed_statements)}")
+                    print(f"[⚠] Synchronisation partielle ({success_count} requêtes SQL exécutées, {len(failed_statements)} en échec).\n")
+                else:
+                    print(f"[✔] Synchronisation PostgreSQL 100% réussie ({success_count} requêtes SQL exécutées) !\n")
             except ImportError:
                 print("[ℹ] Module 'psycopg2' non installé. Installez-le avec : pip install psycopg2-binary")
             except Exception as e:
@@ -262,8 +439,16 @@ def watch_file(sqlite_path: str, output_sql: str, pg_host="localhost", pg_port=5
     print("===================================================================")
     print(f"[👀] Surveillance active sur : {target_file.resolve()}")
     print(f"[⏱] Fréquence de contrôle : Toutes les {CHECK_INTERVAL_SECONDS} secondes.")
+    resolved_db = pg_db
+    if not resolved_db and target_file.exists():
+        model_name = get_industry_model_name(str(target_file))
+        if model_name:
+            resolved_db = clean_postgres_db_name(model_name)
+    if not resolved_db:
+        resolved_db = clean_postgres_db_name(target_file.stem)
+
     if pg_user and pg_pass:
-        print(f"[🗄] Mode : Génération DDL + Application auto sur PostgreSQL (BDD: {pg_db or target_file.stem.lower().replace(' ', '_')})")
+        print(f"[🗄] Mode : Génération DDL + Application auto sur PostgreSQL (BDD: {resolved_db})")
     else:
         print("[📄] Mode : Génération du fichier DDL uniquement (Passer --pg-user et --pg-pass pour l'application auto)")
     print("[Presser CTRL+C pour arrêter le service]\n")
