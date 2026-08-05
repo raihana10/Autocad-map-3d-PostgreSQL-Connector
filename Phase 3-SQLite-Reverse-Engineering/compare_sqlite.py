@@ -3,45 +3,44 @@
 compare_sqlite.py
 ==================
 
-Test 19 - Outil d'analyse automatisee du Data Model Autodesk
---------------------------------------------------------------
+Test 19 - Automated Autodesk Data Model analysis tool
+------------------------------------------------------
 
-Objectif
---------
-Comparer deux exports SQLite successifs (schema_testXX.sql / dump_testXX.sql)
-generes depuis Infrastructure Administrator, et produire un rapport structure
-des changements STRUCTURELS et des changements de DONNEES.
+Purpose
+-------
+Compare two successive SQLite exports (schema_testXX.sql / dump_testXX.sql)
+generated from Infrastructure Administrator, and produce a structured report
+of STRUCTURAL changes and DATA changes.
 
-Pourquoi cette architecture ?
------------------------------
-On ne fait PAS un diff textuel (difflib) des fichiers .sql : un simple
-changement d'ordre des lignes, ou une reecriture equivalente d'un CREATE
-TABLE, produirait de faux positifs. On ne comprendrait pas les objets SQL,
-seulement leur representation textuelle.
+Why this architecture?
+----------------------
+We do NOT perform a textual diff (difflib) of the .sql files: a simple
+reordering of lines, or an equivalent rewrite of a CREATE TABLE, would
+produce false positives. We would not understand the SQL objects, only
+their textual representation.
 
-A la place, on charge chaque fichier .sql dans une base SQLite temporaire
-en memoire (":memory:"), et on delegue le parsing a SQLite lui-meme via :
+Instead, we load each .sql file into a temporary in-memory SQLite database
+(":memory:"), and delegate parsing to SQLite itself via:
 
-    - sqlite_master              -> tables, index, triggers, vues (+ SQL brut)
-    - PRAGMA table_info(table)   -> colonnes, types, NOT NULL, defaut, PK
-    - PRAGMA foreign_key_list()  -> relations entre classes (Test 9)
+    - sqlite_master              -> tables, indexes, triggers, views (+ raw SQL)
+    - PRAGMA table_info(table)   -> columns, types, NOT NULL, default, PK
+    - PRAGMA foreign_key_list()  -> relationships between classes (Test 9)
 
-Cela garantit qu'on compare la structure LOGIQUE et non la mise en forme.
+This ensures we compare the LOGICAL structure, not the formatting.
 
-Pour le dump (donnees), on charge le fichier dans sa propre base memoire
-et on lit les lignes via SELECT * FROM table. Si une cle primaire existe,
-la comparaison se fait PAR CLE (pas par simple appartenance a un ensemble),
-ce qui permet de detecter des "valeurs modifiees" (UPDATE implicite) et pas
-seulement des lignes ajoutees/supprimees.
+For the dump (data), we load the file into its own in-memory database and
+read rows via SELECT * FROM table. If a primary key exists, comparison is
+done BY KEY (not by simple set membership), which allows detecting "modified
+values" (implicit UPDATE) and not only added/removed rows.
 
 Usage
 -----
     python compare_sqlite.py schema_testN.sql schema_testN1.sql \\
                               dump_testN.sql   dump_testN1.sql \\
-                              -o rapport_testN_vs_testN1.md
+                              -o report_testN_vs_testN1.md
 
-Les 4 fichiers sont positionnels et dans cet ordre. Le rapport est ecrit en
-Markdown, directement integrable dans un memoire de PFE.
+The 4 files are positional and in that order. The report is written in
+Markdown, directly embeddable in a PFE thesis.
 """
 
 import argparse
@@ -53,35 +52,34 @@ from pathlib import Path
 
 
 # ---------------------------------------------------------------------------
-# 1. Decoupage robuste d'un script SQL en instructions individuelles
+# 1. Robust splitting of a SQL script into individual statements
 # ---------------------------------------------------------------------------
 _TRANSACTION_STARTERS = {"TRANSACTION", "DEFERRED", "IMMEDIATE", "EXCLUSIVE"}
 
-# Detecte les tokens Inf / -Inf / +Inf / Infinity / NaN ecrits SANS
-# guillemets dans un fichier .sql -- typique d'un export contenant des
-# coordonnees de bounding box "non bornees" (courant en geomatique/FDO).
-# En SQL standard, ce ne sont PAS des litteraux numeriques valides : sans
-# guillemets, SQLite les interprete comme des noms de colonne, ce qui fait
-# echouer l'INSERT entier avec "no such column: Inf" et PERD la ligne de
-# donnee correspondante silencieusement (jusqu'a l'avertissement).
+# Detects Inf / -Inf / +Inf / Infinity / NaN tokens written WITHOUT quotes
+# in a .sql file -- typical of an export containing bounding box coordinates
+# that are "unbounded" (common in geomatics/FDO).
+# In standard SQL, these are NOT valid numeric literals: without quotes,
+# SQLite interprets them as column names, which causes the entire INSERT
+# to fail with "no such column: Inf" and SILENTLY loses the corresponding
+# data row (until the warning).
 #
-# (?<![\w'"]) / (?![\w'"]) : le token ne doit pas etre colle a une lettre,
-# un underscore, ou un guillemet -- ce qui exclut a la fois les mots plus
-# longs (ex. "Infrastructure") ET les occurrences DEJA correctement
-# quotees (ex. 'Inf' comme vraie valeur texte), qui n'ont pas besoin
-# d'etre corrigees.
+# (?<![\w'"]) / (?![\w'"]) : the token must not be adjacent to a letter,
+# underscore, or quote -- which excludes both longer words
+# (e.g. "Infrastructure") AND occurrences already correctly quoted
+# (e.g. 'Inf' as a real text value), which do not need correction.
 _SPECIAL_FLOAT_RE = re.compile(
     r"(?<![\w'\"])([+-]?(?:Infinity|Inf|NaN))(?![\w'\"])", re.IGNORECASE)
 
 
 def normalize_special_floats(sql_text: str) -> str:
     """
-    Reecrit les tokens Inf/-Inf/+Inf/Infinity/NaN non quotes en litteraux
-    texte valides ('Inf', '-Inf', ...), pour que l'instruction SQL reste
-    executable et que la valeur reste comparable entre deux exports (on
-    perd la semantique numerique exacte de l'infini, mais on gagne la
-    capacite de detecter si la valeur a change -- suffisant pour un outil
-    de comparaison, pas de calcul).
+    Rewrites unquoted Inf/-Inf/+Inf/Infinity/NaN tokens into valid text
+    literals ('Inf', '-Inf', ...), so that the SQL statement remains
+    executable and the value remains comparable between two exports (we
+    lose the exact numeric semantics of infinity, but gain the ability
+    to detect if the value has changed -- sufficient for a comparison
+    tool, not for calculation).
     """
     return _SPECIAL_FLOAT_RE.sub(lambda m: f"'{m.group(1)}'", sql_text)
 
@@ -89,11 +87,11 @@ def normalize_special_floats(sql_text: str) -> str:
 
 def _next_word_after(text: str, i: int) -> str:
     """
-    Retourne le prochain "mot" (suite de caracteres alphanumeriques) apres
-    la position i, en sautant les espaces/retours a la ligne. Utilise
-    pour distinguer BEGIN TRANSACTION (qui n'a PAS de END associe -- il se
-    termine par COMMIT/ROLLBACK) du BEGIN qui ouvre le corps d'un trigger
-    ou d'une vue (qui, lui, se termine par END).
+    Returns the next "word" (sequence of alphanumeric characters) after
+    position i, skipping whitespace/newlines. Used to distinguish
+    BEGIN TRANSACTION (which does NOT have a matching END -- it terminates
+    with COMMIT/ROLLBACK) from the BEGIN that opens the body of a trigger
+    or view (which terminates with END).
     """
     j = i
     n = len(text)
@@ -107,21 +105,20 @@ def _next_word_after(text: str, i: int) -> str:
 
 def _match_keyword_at(text: str, i: int):
     """
-    Verifie si un mot-cle SQL (BEGIN, CASE, END) commence exactement a la
-    position i dans `text`, en respectant les frontieres de mot (le
-    caractere avant et apres ne doit pas etre alphanumerique/underscore
-    -- sinon on matcherait "END" a l'interieur de "APPEND" par exemple).
+    Checks if a SQL keyword (BEGIN, CASE, END) starts exactly at position
+    i in `text`, respecting word boundaries (the character before and after
+    must not be alphanumeric/underscore -- otherwise we would match "END"
+    inside "APPEND" for example).
 
-    Retourne le mot-cle trouve ("BEGIN", "CASE" ou "END") ou None.
+    Returns the keyword found ("BEGIN", "CASE" or "END") or None.
 
-    Cas particulier : "BEGIN TRANSACTION" (et ses variantes DEFERRED /
-    IMMEDIATE / EXCLUSIVE) n'ouvre PAS un bloc au sens ou on l'entend ici
-    -- ce BEGIN-la se termine par COMMIT/ROLLBACK, jamais par END. Le
-    compter comme un bloc BEGIN...END casserait le comptage de profondeur
-    pour tout le reste du fichier (le vrai BEGIN...END d'un trigger plus
-    loin ne "fermerait" jamais ce faux bloc). On le detecte donc et on le
-    traite comme un mot-cle neutre (ignore) plutot que comme une
-    ouverture de bloc.
+    Special case: "BEGIN TRANSACTION" (and its variants DEFERRED /
+    IMMEDIATE / EXCLUSIVE) does NOT open a block in the sense we mean here
+    -- this BEGIN terminates with COMMIT/ROLLBACK, never with END. Counting
+    it as a BEGIN...END block would break the depth counting for the rest
+    of the file (the real BEGIN...END of a trigger further down would never
+    "close" this fake block). We detect it and treat it as a neutral keyword
+    (ignored) rather than a block opener.
     """
     if i > 0 and (text[i - 1].isalnum() or text[i - 1] == "_"):
         return None
@@ -131,56 +128,55 @@ def _match_keyword_at(text: str, i: int):
             nxt = text[i + length] if i + length < len(text) else ""
             if not (nxt.isalnum() or nxt == "_"):
                 if kw == "BEGIN" and _next_word_after(text, i + length) in _TRANSACTION_STARTERS:
-                    return "BEGIN_TRANSACTION"  # neutre : ni ouverture ni fermeture
+                    return "BEGIN_TRANSACTION"  # neutral: neither open nor close
                 return kw
     return None
 
 
 def split_sql_statements(sql_text: str):
     """
-    Decoupe un texte SQL en instructions separees par ';', en respectant :
+    Splits a SQL text into statements separated by ';', respecting:
 
-    1. Les chaines de caracteres ('...' et "...") pour ne pas couper un
-       point-virgule qui serait a l'interieur d'une valeur (ex: un dump
-       contenant du texte libre avec des ';').
+    1. String literals ('...' and "...") to avoid splitting on a semicolon
+       that is inside a value (e.g. a dump containing free text with ';').
 
-    2. Les blocs BEGIN...END et CASE...END, qui contiennent eux-memes des
-       ';' internes SANS que ceux-ci terminent l'instruction englobante.
-       C'est le cas typique d'un CREATE TRIGGER :
+    2. BEGIN...END and CASE...END blocks, which contain internal ';' WITHOUT
+       those terminating the enclosing statement. Typical case of a
+       CREATE TRIGGER:
 
            CREATE TRIGGER trg_check BEFORE INSERT ON tb_class
            BEGIN
                SELECT CASE WHEN NEW.FID IS NULL
-                   THEN RAISE(ABORT, 'FID requis') END;
+                   THEN RAISE(ABORT, 'FID required') END;
                UPDATE tb_class SET x = NEW.FID WHERE id = NEW.id;
            END;
 
-       Sans ce suivi, le premier ';' interne (apres le CASE...END, ou
-       apres le premier UPDATE) serait pris pour la fin du CREATE TRIGGER
-       -- le fragment restant, execute hors contexte de trigger, provoque
-       des erreurs en cascade ("RAISE() may only be used within a
-       trigger-program", "no such column: new.FID", etc.) qui n'ont rien
-       a voir avec un vrai probleme du fichier source.
+       Without this tracking, the first internal ';' (after the CASE...END,
+       or after the first UPDATE) would be taken as the end of the CREATE
+       TRIGGER -- the remaining fragment, executed outside trigger context,
+       causes cascading errors ("RAISE() may only be used within a
+       trigger-program", "no such column: new.FID", etc.) that have nothing
+       to do with a real problem in the source file.
 
-       On maintient un compteur `block_depth`, incremente sur BEGIN et
-       CASE (les deux s'achevent par un END), decremente sur END. Une
-       coupure sur ';' n'est autorisee que si block_depth == 0 -- c'est-a-
-       dire hors de tout bloc BEGIN...END ou CASE...END.
+       We maintain a `block_depth` counter, incremented on BEGIN and CASE
+       (both end with END), decremented on END. A split on ';' is only
+       allowed if block_depth == 0 -- i.e. outside any BEGIN...END or
+       CASE...END block.
 
-    On evite executescript() brut car un fichier .dump genere par Autodesk/
-    sqlite3 peut contenir un CREATE TABLE deja present (rejoue plusieurs
-    fois) ou une instruction non supportee : on veut pouvoir ignorer une
-    instruction en erreur SANS perdre tout le reste du fichier.
+    We avoid raw executescript() because a .dump file generated by Autodesk/
+    sqlite3 may contain a CREATE TABLE already present (replayed multiple
+    times) or an unsupported statement: we want to be able to ignore a
+    failing statement WITHOUT losing the rest of the file.
     """
-    statements = []  # ce qu'on va retourner a la fin
-    buf = []  # instruction en cours de construction (liste de caracteres)
-    in_single = False  # au depart, on n'est dans aucune chaine
+    statements = []  # what we will return at the end
+    buf = []  # current statement being built (list of characters)
+    in_single = False  # at the start, we are not inside any string
     in_double = False
     block_depth = 0
-    i = 0  # index de lecture dans le texte
-    n = len(sql_text)  # longueur totale, pour savoir quand s'arreter
-    # on utilise une boucle while pour qu'on puisse sauter des chars dans
-    # quelques cas (echappement, ou mot-cle BEGIN/CASE/END multi-caracteres)
+    i = 0  # read index in the text
+    n = len(sql_text)  # total length, to know when to stop
+    # we use a while loop so we can skip characters in some cases
+    # (escaping, or multi-character BEGIN/CASE/END keywords)
     while i < n:
         ch = sql_text[i]
 
@@ -191,46 +187,44 @@ def split_sql_statements(sql_text: str):
                     block_depth += 1
                 elif kw == "END":
                     block_depth = max(0, block_depth - 1)
-                # "BEGIN_TRANSACTION" : mot-cle neutre, aucun effet sur
-                # block_depth (voir _match_keyword_at)
+                # "BEGIN_TRANSACTION": neutral keyword, no effect on
+                # block_depth (see _match_keyword_at)
                 kw_len = 5 if kw == "BEGIN_TRANSACTION" else len(kw)
                 buf.append(sql_text[i:i + kw_len])
                 i += kw_len
                 continue
 
-        # chaque char lu (hors mot-cle BEGIN/CASE/END gere ci-dessus) est
-        # ajoute au buffer
+        # each character read (except BEGIN/CASE/END keywords handled above)
+        # is added to the buffer
         buf.append(ch)
-        # Condition : le caractere est une apostrophe, ET on n'est pas deja
-        # dans une chaine "..." (le not in_double est important : si on
-        # est entre "", une ' est juste un caractere normal du texte, ex.
-        # "L'objet" : elle ne doit rien declencher).
+        # Condition: the character is an apostrophe, AND we are not already
+        # inside a "..." string (the not in_double is important: if we are
+        # between "", a ' is just a normal text character, e.g. "L'objet":
+        # it should not trigger anything).
         if ch == "'" and not in_double:
-            # gere l'echappement '' (apostrophe litterale dans SQLite,
-            # Ex: INSERT INTO tb_class VALUES(1, 'L''objet');)
-            # in_single : on est bien deja dans une chaine (donc cette
-            #   apostrophe pourrait etre une fin de chaine OU un echappement)
-            # i + 1 < n : il reste au moins un caractere apres (securite
-            #   pour ne pas sortir du texte)
-            # sql_text[i + 1] == "'" : le caractere suivant est aussi une
-            #   apostrophe
+            # handle '' escaping (literal apostrophe in SQLite,
+            # e.g.: INSERT INTO tb_class VALUES(1, 'L''objet');)
+            # in_single: we are indeed already in a string (so this
+            #   apostrophe could be end-of-string OR an escape)
+            # i + 1 < n: at least one character remains after (safety check
+            #   to not go past end of text)
+            # sql_text[i + 1] == "'": the next character is also an apostrophe
             if in_single and i + 1 < n and sql_text[i + 1] == "'":
                 buf.append(sql_text[i + 1])
-                i += 2  # avancer l'index de 2 car ''
+                i += 2  # advance index by 2 because ''
                 continue
-            in_single = not in_single  # si on n'etait pas dans une chaine,
-            # on y entre (False -> True) ; si on y etait, on en sort (True -> False)
+            in_single = not in_single  # if not inside a string, enter it
+            # (False -> True); if inside, exit it (True -> False)
         elif ch == '"' and not in_single:
             in_double = not in_double
         elif ch == ";" and not in_single and not in_double and block_depth == 0:
-            # le caractere est un ';' ET on n'est dans aucune des deux
-            # chaines ET hors de tout bloc BEGIN...END/CASE...END, donc
-            # c'est la fin d'une instruction SQL complete
+            # the character is a ';' AND we are not inside any string AND
+            # outside any BEGIN...END/CASE...END block, so this is the end
+            # of a complete SQL statement
             stmt = "".join(buf).strip()
             if stmt and stmt != ";":
                 statements.append(stmt)
-            buf = []  # on reinitialise le buffer pour commencer a
-            # accumuler la prochaine instruction
+            buf = []  # reset the buffer to start accumulating the next statement
         i += 1
     tail = "".join(buf).strip()
     if tail:
@@ -241,11 +235,11 @@ def split_sql_statements(sql_text: str):
 
 def safe_executescript(conn: sqlite3.Connection, sql_text: str, label: str):
     """
-    Execute un script SQL instruction par instruction, en ignorant les
-    erreurs individuelles (table deja existante, syntaxe non supportee,
-    etc.) mais en les journalisant sur stderr. On privilegie la recuperation
-    du maximum d'information plutot qu'un arret brutal : le but est une
-    comparaison, pas une restauration parfaite de la base.
+    Executes a SQL script statement by statement, ignoring individual
+    errors (table already exists, unsupported syntax, etc.) but logging
+    them to stderr. We favor recovering as much information as possible
+    rather than a hard stop: the goal is comparison, not perfect
+    database restoration.
     """
     cur = conn.cursor()
     errors = 0
@@ -254,27 +248,27 @@ def safe_executescript(conn: sqlite3.Connection, sql_text: str, label: str):
             cur.execute(stmt)
         except sqlite3.Error as exc:
             errors += 1
-            print(f"[avertissement] {label}: instruction ignoree ({exc})",
+            print(f"[warning] {label}: statement ignored ({exc})",
                   file=sys.stderr)
     conn.commit()
     return errors
 
 
 # ---------------------------------------------------------------------------
-# 2. Structures de donnees
+# 2. Data structures
 # ---------------------------------------------------------------------------
-# Nous avons besoin de ces structures pour stocker les informations extraites
-# de SQLite dans un format Python exploitable, afin de pouvoir comparer les
-# schemas et les dumps de maniere efficace et structuree.
-# Elles transforment "du SQL qu'on doit reparser a chaque comparaison" en
-# "des objets Python qu'on compare une fois pour toutes".
+# We need these structures to store information extracted from SQLite in an
+# exploitable Python format, in order to compare schemas and dumps
+# efficiently and structurally.
+# They transform "SQL that we have to reparse at each comparison" into
+# "Python objects that we compare once and for all".
 @dataclass
 class ColumnInfo:
     name: str
     type: str
     notnull: bool
     default: object
-    pk: int  # 0 = pas PK, sinon position dans la cle primaire composite
+    pk: int  # 0 = not PK, otherwise position in the composite primary key
 
 
 @dataclass
@@ -282,7 +276,7 @@ class TableSchema:
     name: str
     create_sql: str
     columns: dict = field(default_factory=dict)      # name -> ColumnInfo
-    foreign_keys: list = field(default_factory=list)  # liste de tuples
+    foreign_keys: list = field(default_factory=list)  # list of tuples
 
 
 @dataclass
@@ -294,17 +288,17 @@ class SchemaSnapshot:
 
 
 # ---------------------------------------------------------------------------
-# 3. Chargement du schema (schema_testXX.sql)
+# 3. Loading the schema (schema_testXX.sql)
 # ---------------------------------------------------------------------------
 def load_schema(path: str) -> SchemaSnapshot:
-    # isolation_level=None desactive la gestion de transaction IMPLICITE du
-    # module sqlite3 (qui ouvre normalement une transaction automatique
-    # avant tout INSERT/UPDATE/DELETE/CREATE). Sans ca, un "BEGIN
-    # TRANSACTION;" ou un "COMMIT;" explicite present dans le fichier
-    # source entre en conflit avec cette gestion automatique et echoue
-    # avec "cannot commit - no transaction is active". En mode autocommit,
-    # ce sont les instructions du fichier qui pilotent seules les
-    # transactions, exactement comme le ferait le CLI sqlite3 officiel.
+    # isolation_level=None disables the IMPLICIT transaction management of
+    # the sqlite3 module (which normally opens an automatic transaction
+    # before any INSERT/UPDATE/DELETE/CREATE). Without this, a "BEGIN
+    # TRANSACTION;" or "COMMIT;" explicitly present in the source file
+    # conflicts with this automatic management and fails with "cannot
+    # commit - no transaction is active". In autocommit mode, the file's
+    # own statements control transactions alone, exactly as the official
+    # sqlite3 CLI would do.
     conn = sqlite3.connect(":memory:")
     conn.isolation_level = None
     sql_text = Path(path).read_text(encoding="utf-8", errors="replace")
@@ -350,28 +344,27 @@ def load_schema(path: str) -> SchemaSnapshot:
 
 
 # ---------------------------------------------------------------------------
-# 4. Chargement du dump (dump_testXX.sql)
+# 4. Loading the dump (dump_testXX.sql)
 # ---------------------------------------------------------------------------
 def load_dump(path: str, fallback_schema_path: str = None) -> dict:
     """
-    Retourne { table_name: {"columns": [...], "pk": [...], "rows": {key: row}} }
+    Returns { table_name: {"columns": [...], "pk": [...], "rows": {key: row}} }
 
-    Si le fichier dump ne contient QUE des INSERT (pas de CREATE TABLE),
-    on cree d'abord les tables a partir d'un schema de secours
-    (typiquement le schema_testXX.sql du meme test) pour pouvoir executer
-    les INSERT.
+    If the dump file contains ONLY INSERTs (no CREATE TABLE), we first
+    create the tables from a fallback schema (typically the schema_testXX.sql
+    from the same test) to be able to execute the INSERTs.
     """
     conn = sqlite3.connect(":memory:")
-    conn.isolation_level = None  # cf. commentaire dans load_schema()
+    conn.isolation_level = None  # see comment in load_schema()
 
     dump_sql = Path(path).read_text(encoding="utf-8", errors="replace")
     dump_sql = normalize_special_floats(dump_sql)
     dump_defines_tables = "CREATE TABLE" in dump_sql.upper()
 
-    # On ne charge le schema de secours QUE si le dump ne contient pas deja
-    # ses propres CREATE TABLE (cas d'un export contenant uniquement des
-    # INSERT). Cela evite des avertissements "table already exists" inutiles
-    # quand le dump est autosuffisant (sortie `.dump` classique de sqlite3).
+    # We only load the fallback schema IF the dump does not already contain
+    # its own CREATE TABLE statements (case of an export containing only
+    # INSERTs). This avoids unnecessary "table already exists" warnings
+    # when the dump is self-sufficient (classic `.dump` output from sqlite3).
     if fallback_schema_path and not dump_defines_tables:
         schema_sql = Path(fallback_schema_path).read_text(
             encoding="utf-8", errors="replace")
@@ -399,7 +392,7 @@ def load_dump(path: str, fallback_schema_path: str = None) -> dict:
             cur.execute(f'SELECT * FROM "{name}"')
             raw_rows = cur.fetchall()
         except sqlite3.Error as exc:
-            print(f"[avertissement] lecture table {name} impossible ({exc})",
+            print(f"[warning] unable to read table {name} ({exc})",
                   file=sys.stderr)
             raw_rows = []
 
@@ -409,7 +402,7 @@ def load_dump(path: str, fallback_schema_path: str = None) -> dict:
             if pk_cols:
                 key = tuple(row_dict[c] for c in pk_cols)
             else:
-                # pas de PK connue -> la ligne entiere est sa propre cle
+                # no known PK -> the entire row is its own key
                 key = tuple(r)
             rows[key] = row_dict
 
@@ -420,7 +413,7 @@ def load_dump(path: str, fallback_schema_path: str = None) -> dict:
 
 
 # ---------------------------------------------------------------------------
-# 5. Comparaison des schemas
+# 5. Schema comparison
 # ---------------------------------------------------------------------------
 def compare_schemas(old: SchemaSnapshot, new: SchemaSnapshot) -> dict:
     diff = {
@@ -471,7 +464,7 @@ def compare_schemas(old: SchemaSnapshot, new: SchemaSnapshot) -> dict:
         if modified:
             diff["columns_modified"][tname] = modified
 
-        # Relations (cles etrangeres) -- Test 9
+        # Relations (foreign keys) -- Test 9
         old_fk = {tuple(fk) for fk in old_t.foreign_keys}
         new_fk = {tuple(fk) for fk in new_t.foreign_keys}
         if new_fk - old_fk:
@@ -494,7 +487,7 @@ def compare_schemas(old: SchemaSnapshot, new: SchemaSnapshot) -> dict:
 
 
 # ---------------------------------------------------------------------------
-# 6. Comparaison des dumps (donnees)
+# 6. Dump comparison (data)
 # ---------------------------------------------------------------------------
 def compare_dumps(old_dump: dict, new_dump: dict) -> dict:
     diff = {}  # table -> {"added": [...], "removed": [...], "modified": [...]}
@@ -532,9 +525,9 @@ def compare_dumps(old_dump: dict, new_dump: dict) -> dict:
 
 def summarize_diff(schema_diff: dict, dump_diff: dict) -> dict:
     """
-    Reduit un couple (schema_diff, dump_diff) a des compteurs simples.
-    Sert a construire la ligne de synthese d'une transition dans le
-    rapport consolide du mode batch (--batch-dir).
+    Reduces a (schema_diff, dump_diff) pair to simple counters.
+    Used to build the summary line for a transition in the consolidated
+    report of batch mode (--batch-dir).
     """
     n_cols_added = sum(len(v) for v in schema_diff["columns_added"].values())
     n_cols_removed = sum(len(v) for v in schema_diff["columns_removed"].values())
@@ -561,35 +554,35 @@ def summarize_diff(schema_diff: dict, dump_diff: dict) -> dict:
 
 
 # ---------------------------------------------------------------------------
-# 7. Generation du rapport Markdown
+# 7. Markdown report generation
 # ---------------------------------------------------------------------------
 def generate_report(schema_diff, dump_diff, old_label, new_label) -> str:
     lines = []
-    lines.append(f"# Comparaison `{old_label}` -> `{new_label}`\n")
+    lines.append(f"# Comparison `{old_label}` -> `{new_label}`\n")
 
     def section(title):
         lines.append(f"\n## {title}\n")
 
     # --- Tables ---
-    section("Tables ajoutees")
+    section("Tables added")
     if schema_diff["tables_added"]:
         for t in schema_diff["tables_added"]:
             lines.append(f"- `+ {t}`")
     else:
-        lines.append("Aucune")
+        lines.append("None")
 
-    section("Tables supprimees")
+    section("Tables removed")
     if schema_diff["tables_removed"]:
         for t in schema_diff["tables_removed"]:
             lines.append(f"- `- {t}`")
     else:
-        lines.append("Aucune")
+        lines.append("None")
 
-    # --- Colonnes ajoutees ---
-    section("Colonnes ajoutees")
+    # --- Columns added ---
+    section("Columns added")
     if schema_diff["columns_added"]:
         for tname, cols in schema_diff["columns_added"].items():
-            lines.append(f"\n**Table : `{tname}`**")
+            lines.append(f"\n**Table: `{tname}`**")
             for c in cols:
                 attrs = [c.type]
                 if c.notnull: attrs.append("NOT NULL")
@@ -598,13 +591,13 @@ def generate_report(schema_diff, dump_diff, old_label, new_label) -> str:
                 attr_str = ", ".join(attrs)
                 lines.append(f"- `+ {c.name} ({attr_str})`")
     else:
-        lines.append("Aucune")
+        lines.append("None")
 
-    # --- Colonnes supprimees ---
-    section("Colonnes supprimees")
+    # --- Columns removed ---
+    section("Columns removed")
     if schema_diff["columns_removed"]:
         for tname, cols in schema_diff["columns_removed"].items():
-            lines.append(f"\n**Table : `{tname}`**")
+            lines.append(f"\n**Table: `{tname}`**")
             for c in cols:
                 attrs = [c.type]
                 if c.notnull: attrs.append("NOT NULL")
@@ -613,102 +606,101 @@ def generate_report(schema_diff, dump_diff, old_label, new_label) -> str:
                 attr_str = ", ".join(attrs)
                 lines.append(f"- `- {c.name} ({attr_str})`")
     else:
-        lines.append("Aucune")
+        lines.append("None")
 
-    # --- Colonnes modifiees ---
-    section("Colonnes modifiees")
+    # --- Columns modified ---
+    section("Columns modified")
     if schema_diff["columns_modified"]:
         for tname, mods in schema_diff["columns_modified"].items():
-            lines.append(f"\n**Table : `{tname}`**")
+            lines.append(f"\n**Table: `{tname}`**")
             for cname, changes in mods:
-                lines.append(f"- Colonne `{cname}` :")
+                lines.append(f"- Column `{cname}`:")
                 for prop, (ov, nv) in changes.items():
-                    lines.append(f"  - {prop} : `{ov}` -> `{nv}`")
+                    lines.append(f"  - {prop}: `{ov}` -> `{nv}`")
     else:
-        lines.append("Aucune")
+        lines.append("None")
 
     # --- Relations (FK) ---
-    section("Relations ajoutees (cles etrangeres)")
+    section("Relations added (foreign keys)")
     if schema_diff["fk_added"]:
         for tname, fks in schema_diff["fk_added"].items():
             for fk in fks:
-                lines.append(f"- `{tname}` : `+ {fk}`")
+                lines.append(f"- `{tname}`: `+ {fk}`")
     else:
-        lines.append("Aucune")
+        lines.append("None")
 
-    section("Relations supprimees (cles etrangeres)")
+    section("Relations removed (foreign keys)")
     if schema_diff["fk_removed"]:
         for tname, fks in schema_diff["fk_removed"].items():
             for fk in fks:
-                lines.append(f"- `{tname}` : `- {fk}`")
+                lines.append(f"- `{tname}`: `- {fk}`")
     else:
-        lines.append("Aucune")
+        lines.append("None")
 
-    # --- Index / triggers / vues ---
+    # --- Indexes / triggers / views ---
     for label, added_key, removed_key in [
-        ("Index", "indexes_added", "indexes_removed"),
+        ("Indexes", "indexes_added", "indexes_removed"),
         ("Triggers", "triggers_added", "triggers_removed"),
-        ("Vues", "views_added", "views_removed"),
+        ("Views", "views_added", "views_removed"),
     ]:
-        section(f"{label} ajoutes")
+        section(f"{label} added")
         if schema_diff[added_key]:
             for n in schema_diff[added_key]:
                 lines.append(f"- `+ {n}`")
         else:
-            lines.append("Aucun")
+            lines.append("None")
 
-        section(f"{label} supprimes")
+        section(f"{label} removed")
         if schema_diff[removed_key]:
             for n in schema_diff[removed_key]:
                 lines.append(f"- `- {n}`")
         else:
-            lines.append("Aucun")
+            lines.append("None")
 
-    # --- Donnees ---
-    section("Donnees (dump)")
+    # --- Data ---
+    section("Data (dump)")
     if not dump_diff:
-        lines.append("Aucune difference de donnees detectee.")
+        lines.append("No data difference detected.")
     else:
         for tname, d in dump_diff.items():
-            lines.append(f"\n**Table : `{tname}`**")
+            lines.append(f"\n**Table: `{tname}`**")
             if d["added"]:
-                lines.append(f"\n_{len(d['added'])} ligne(s) ajoutee(s)_")
+                lines.append(f"\n_{len(d['added'])} row(s) added_")
                 for row in d["added"]:
                     lines.append(f"- `+ {row}`")
             if d["removed"]:
-                lines.append(f"\n_{len(d['removed'])} ligne(s) supprimee(s)_")
+                lines.append(f"\n_{len(d['removed'])} row(s) removed_")
                 for row in d["removed"]:
                     lines.append(f"- `- {row}`")
             if d["modified"]:
-                lines.append(f"\n_{len(d['modified'])} ligne(s) modifiee(s)_")
+                lines.append(f"\n_{len(d['modified'])} row(s) modified_")
                 for key, changes in d["modified"]:
-                    pk_label = d["pk"] if d["pk"] else "cle"
-                    lines.append(f"- Ligne `{pk_label}={key}` :")
+                    pk_label = d["pk"] if d["pk"] else "key"
+                    lines.append(f"- Row `{pk_label}={key}`:")
                     for col, (ov, nv) in changes.items():
-                        lines.append(f"  - `{col}` : `{ov}` -> `{nv}`")
+                        lines.append(f"  - `{col}`: `{ov}` -> `{nv}`")
 
     return "\n".join(lines) + "\n"
 
 
 # ---------------------------------------------------------------------------
-# 8. Mode batch : comparer toute une serie de tests en une fois
+# 8. Batch mode: compare an entire series of tests at once
 # ---------------------------------------------------------------------------
 def discover_test_files(directory: str) -> dict:
     """
-    Scanne un dossier -- et TOUS ses sous-dossiers, recursivement -- et
-    associe a chaque numero de test le couple de fichiers (schema, dump)
-    trouve, en se basant sur les noms 'schema_testXX.sql' /
-    'dump_testXX.sql' (insensible a la casse).
+    Scans a directory -- and ALL its subdirectories recursively -- and
+    associates each test number with the pair of files (schema, dump)
+    found, based on the names 'schema_testXX.sql' / 'dump_testXX.sql'
+    (case-insensitive).
 
-    La recherche est recursive (Path.rglob) car chaque test peut se
-    trouver dans son propre sous-dossier (ex. Test0/dump_test00.sql,
-    Test1/dump_test01.sql, ...), ce qui est la convention utilisee dans ce
-    projet -- un simple listage du premier niveau (iterdir) ne trouverait
-    aucun fichier.
+    The search is recursive (Path.rglob) because each test may be in its
+    own subdirectory (e.g. Test0/dump_test00.sql, Test1/dump_test01.sql,
+    ...), which is the convention used in this project -- a simple
+    first-level listing (iterdir) would find no files.
 
-    Retourne { numero_test: {"schema": path, "dump": path} }, uniquement
-    pour les numeros ou LES DEUX fichiers existent (un test dont il manque
-    le schema ou le dump est ignore avec un avertissement).
+    Returns { test_number: {"schema": path, "dump": path} }, only for
+    numbers where BOTH files exist (a test missing the schema or dump is
+    ignored with a warning).
     """
     schema_pat = re.compile(r"schema_test0*(\d+)\.sql$", re.IGNORECASE)
     dump_pat = re.compile(r"dump_test0*(\d+)\.sql$", re.IGNORECASE)
@@ -721,18 +713,18 @@ def discover_test_files(directory: str) -> dict:
         if m:
             n = int(m.group(1))
             if n in schemas:
-                print(f"[avertissement] plusieurs schema_test{n} trouves "
-                      f"({schemas[n]} et {path}) -- le dernier trouve est "
-                      f"conserve", file=sys.stderr)
+                print(f"[warning] multiple schema_test{n} found "
+                      f"({schemas[n]} and {path}) -- keeping the last one",
+                      file=sys.stderr)
             schemas[n] = str(path)
             continue
         m = dump_pat.match(path.name)
         if m:
             n = int(m.group(1))
             if n in dumps:
-                print(f"[avertissement] plusieurs dump_test{n} trouves "
-                      f"({dumps[n]} et {path}) -- le dernier trouve est "
-                      f"conserve", file=sys.stderr)
+                print(f"[warning] multiple dump_test{n} found "
+                      f"({dumps[n]} and {path}) -- keeping the last one",
+                      file=sys.stderr)
             dumps[n] = str(path)
 
     tests = {}
@@ -742,7 +734,7 @@ def discover_test_files(directory: str) -> dict:
             tests[n] = {"schema": schemas[n], "dump": dumps[n]}
         else:
             missing = "dump" if n in schemas else "schema"
-            print(f"[avertissement] Test {n} ignore : {missing} manquant",
+            print(f"[warning] Test {n} ignored: {missing} missing",
                   file=sys.stderr)
 
     return tests
@@ -750,17 +742,17 @@ def discover_test_files(directory: str) -> dict:
 
 def run_batch(directory: str, out_dir: str):
     """
-    Compare automatiquement chaque test avec le test disponible precedent
-    (dans l'ordre croissant des numeros trouves -- pas forcement N vs N+1
-    si des numeros sont absents, ex. Tests 13/14/15 volontairement exclus
-    du projet). Genere un rapport par transition + un rapport de synthese
-    global 'rapport_synthese.md'.
+    Automatically compares each test with the previous available test
+    (in ascending order of found numbers -- not necessarily N vs N+1 if
+    some numbers are absent, e.g. Tests 13/14/15 intentionally excluded
+    from the project). Generates one report per transition + a global
+    summary report 'report_summary.md'.
     """
     tests = discover_test_files(directory)
     numbers = sorted(tests)
     if len(numbers) < 2:
-        print("[erreur] Il faut au moins 2 tests complets (schema+dump) "
-              "pour comparer.", file=sys.stderr)
+        print("[error] At least 2 complete tests (schema+dump) are needed "
+              "to compare.", file=sys.stderr)
         sys.exit(1)
 
     Path(out_dir).mkdir(parents=True, exist_ok=True)
@@ -770,7 +762,7 @@ def run_batch(directory: str, out_dir: str):
         old_files, new_files = tests[old_n], tests[new_n]
         old_label, new_label = f"test{old_n}", f"test{new_n}"
 
-        print(f"[info] comparaison {old_label} -> {new_label}")
+        print(f"[info] comparing {old_label} -> {new_label}")
         old_schema = load_schema(old_files["schema"])
         new_schema = load_schema(new_files["schema"])
         old_dump = load_dump(old_files["dump"], fallback_schema_path=old_files["schema"])
@@ -780,7 +772,7 @@ def run_batch(directory: str, out_dir: str):
         dump_diff = compare_dumps(old_dump, new_dump)
 
         report = generate_report(schema_diff, dump_diff, old_label, new_label)
-        report_name = f"rapport_{old_label}_vs_{new_label}.md"
+        report_name = f"report_{old_label}_vs_{new_label}.md"
         report_path = Path(out_dir) / report_name
         report_path.write_text(report, encoding="utf-8")
 
@@ -789,10 +781,10 @@ def run_batch(directory: str, out_dir: str):
                        "report": report_name})
         summary_rows.append(counts)
 
-    # --- Rapport de synthese global ---
-    lines = ["# Synthese globale des tests\n",
-             "| Transition | Tables +/- | Colonnes +/-/~ | FK +/- | "
-             "Lignes +/-/~ | Rapport |",
+    # --- Global summary report ---
+    lines = ["# Global test summary\n",
+             "| Transition | Tables +/- | Columns +/-/~ | FK +/- | "
+             "Rows +/-/~ | Report |",
              "|---|---|---|---|---|---|"]
     for r in summary_rows:
         lines.append(
@@ -805,37 +797,37 @@ def run_batch(directory: str, out_dir: str):
             f"~{r['rows_modified']} "
             f"| [{r['report']}]({r['report']}) |"
         )
-    summary_path = Path(out_dir) / "rapport_synthese.md"
+    summary_path = Path(out_dir) / "report_summary.md"
     summary_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
-    print(f"[ok] {len(summary_rows)} transition(s) comparee(s)")
-    print(f"[ok] rapports individuels dans : {out_dir}/")
-    print(f"[ok] synthese globale : {summary_path}")
+    print(f"[ok] {len(summary_rows)} transition(s) compared")
+    print(f"[ok] individual reports in: {out_dir}/")
+    print(f"[ok] global summary: {summary_path}")
 
 
 # ---------------------------------------------------------------------------
-# 9. Point d'entree CLI
+# 9. CLI entry point
 # ---------------------------------------------------------------------------
 def main():
     parser = argparse.ArgumentParser(
-        description="Test 19 - Comparaison automatisee d'exports SQLite "
-                    "(schema + dump) d'un Data Model Autodesk. "
-                    "Mode paire (defaut) : compare 2 tests precis. "
-                    "Mode batch (--batch-dir) : compare toute une serie.")
-    parser.add_argument("schema_old", nargs="?", help="schema_testN.sql (ancien)")
-    parser.add_argument("schema_new", nargs="?", help="schema_testN+1.sql (nouveau)")
-    parser.add_argument("dump_old", nargs="?", help="dump_testN.sql (ancien)")
-    parser.add_argument("dump_new", nargs="?", help="dump_testN+1.sql (nouveau)")
+        description="Test 19 - Automated comparison of SQLite exports "
+                    "(schema + dump) from an Autodesk Data Model. "
+                    "Pair mode (default): compares 2 specific tests. "
+                    "Batch mode (--batch-dir): compares an entire series.")
+    parser.add_argument("schema_old", nargs="?", help="schema_testN.sql (old)")
+    parser.add_argument("schema_new", nargs="?", help="schema_testN+1.sql (new)")
+    parser.add_argument("dump_old", nargs="?", help="dump_testN.sql (old)")
+    parser.add_argument("dump_new", nargs="?", help="dump_testN+1.sql (new)")
     parser.add_argument("-o", "--output", default=None,
-                        help="Fichier markdown de sortie (mode paire) "
-                             "(defaut: rapport_<old>_vs_<new>.md)")
+                        help="Output markdown file (pair mode) "
+                             "(default: report_<old>_vs_<new>.md)")
     parser.add_argument("--batch-dir", default=None,
-                        help="Dossier contenant tous les schema_testXX.sql "
-                             "/ dump_testXX.sql a comparer automatiquement "
-                             "en serie (active le mode batch).")
-    parser.add_argument("--out-dir", default="rapports",
-                        help="Dossier de sortie pour le mode batch "
-                             "(defaut: ./rapports)")
+                        help="Directory containing all schema_testXX.sql / "
+                             "dump_testXX.sql to compare automatically in "
+                             "series (activates batch mode).")
+    parser.add_argument("--out-dir", default="reports",
+                        help="Output directory for batch mode "
+                             "(default: ./reports)")
     args = parser.parse_args()
 
     if args.batch_dir:
@@ -843,20 +835,20 @@ def main():
         return
 
     if not all([args.schema_old, args.schema_new, args.dump_old, args.dump_new]):
-        parser.error("En mode paire, les 4 fichiers positionnels sont "
-                     "requis (ou utilisez --batch-dir).")
+        parser.error("In pair mode, all 4 positional files are required "
+                     "(or use --batch-dir).")
 
     old_label = Path(args.schema_old).stem
     new_label = Path(args.schema_new).stem
 
-    print(f"[info] chargement du schema : {args.schema_old}")
+    print(f"[info] loading schema: {args.schema_old}")
     old_schema = load_schema(args.schema_old)
-    print(f"[info] chargement du schema : {args.schema_new}")
+    print(f"[info] loading schema: {args.schema_new}")
     new_schema = load_schema(args.schema_new)
 
-    print(f"[info] chargement du dump : {args.dump_old}")
+    print(f"[info] loading dump: {args.dump_old}")
     old_dump = load_dump(args.dump_old, fallback_schema_path=args.schema_old)
-    print(f"[info] chargement du dump : {args.dump_new}")
+    print(f"[info] loading dump: {args.dump_new}")
     new_dump = load_dump(args.dump_new, fallback_schema_path=args.schema_new)
 
     schema_diff = compare_schemas(old_schema, new_schema)
@@ -864,9 +856,9 @@ def main():
 
     report = generate_report(schema_diff, dump_diff, old_label, new_label)
 
-    out_path = args.output or f"rapport_{old_label}_vs_{new_label}.md"
+    out_path = args.output or f"report_{old_label}_vs_{new_label}.md"
     Path(out_path).write_text(report, encoding="utf-8")
-    print(f"[ok] rapport genere : {out_path}")
+    print(f"[ok] report generated: {out_path}")
 
 
 if __name__ == "__main__":
