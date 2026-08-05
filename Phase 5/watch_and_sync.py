@@ -174,27 +174,34 @@ _NON_SQLITE_EXTS = {
 _SQLITE_MAGIC = b"SQLite format 3\x00"
 
 
+_ANALYZED_SQLITES = {}  # file_path -> (mtime, is_valid)
+
+
 def is_autodesk_sqlite(file_path: str) -> bool:
     """
     Vérifie si un fichier SQLite est un Data Model Autodesk valide.
-    Utilise une validation en 3 niveaux pour être ultra-rapide :
-      1. Exclusion immédiate par extension connue non-SQLite
-      2. Exclusion des fichiers systèmes Autodesk (tbsys, system)
-      3. Lecture des 16 octets de signature SQLite (magic header)
-      4. Connexion SQLite pour vérifier la table TB_DICTIONARY
+    Utilise un cache basé sur le mtime pour éviter de relire le fichier inutilement et limiter les logs répétitifs.
     """
     try:
         if not os.path.isfile(file_path):
             return False
+            
+        mtime = os.path.getmtime(file_path)
+        if file_path in _ANALYZED_SQLITES:
+            cached_mtime, cached_val = _ANALYZED_SQLITES[file_path]
+            if cached_mtime == mtime:
+                return cached_val
 
         # Niveau 1 : exclusion par extension (0,001 ms)
         ext = Path(file_path).suffix.lower()
         if ext in _NON_SQLITE_EXTS:
+            _ANALYZED_SQLITES[file_path] = (mtime, False)
             return False
 
         # Niveau 2 : exclusion des fichiers système Autodesk
         fname = Path(file_path).name.lower()
         if "tbsys" in fname or "system" in fname:
+            _ANALYZED_SQLITES[file_path] = (mtime, False)
             return False
 
         # Niveau 3 : lecture des 16 octets magiques SQLite (0,01 ms)
@@ -202,9 +209,13 @@ def is_autodesk_sqlite(file_path: str) -> bool:
             with open(file_path, "rb") as f:
                 header = f.read(16)
             if header != _SQLITE_MAGIC:
+                _ANALYZED_SQLITES[file_path] = (mtime, False)
                 return False
         except (OSError, PermissionError):
             return False
+
+        # Log pour connaître le chemin exact d'où le script déduit que c'est un modèle d'industrie
+        print(f"[🔍] Examen du fichier SQLite candidat : {file_path}")
 
         # Niveau 4 : vérification de la table TB_DICTIONARY (unique aux Data Models Autodesk)
         conn = sqlite3.connect(file_path, timeout=2.0)
@@ -212,6 +223,14 @@ def is_autodesk_sqlite(file_path: str) -> bool:
         cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='TB_DICTIONARY';")
         has_tb_dict = cursor.fetchone() is not None
         conn.close()
+        
+        if has_tb_dict:
+            print(f"    ├─ [✔] Table système 'TB_DICTIONARY' trouvée dans la base.")
+            print(f"    └─ [✔] Identifié comme Industry Model Autodesk valide.")
+        else:
+            print(f"    └─ [❌] Table 'TB_DICTIONARY' absente (ce n'est pas un Industry Model).")
+
+        _ANALYZED_SQLITES[file_path] = (mtime, has_tb_dict)
         return has_tb_dict
     except Exception:
         return False
@@ -300,6 +319,108 @@ def get_industry_model_name(sqlite_path: str) -> str:
     except Exception as e:
         print(f"[⚠️] Note lors de la récupération du nom du modèle (TB_INFO) : {e}")
     return None
+
+
+def sync_table_columns(sqlite_path: str, pg_conn, default_srid=2154):
+    """
+    Synchronise dynamiquement les colonnes des tables de SQLite vers PostgreSQL.
+    Pour chaque colonne présente dans SQLite mais absente dans PostgreSQL, 
+    émet une commande ALTER TABLE ADD COLUMN avec le bon type.
+    """
+    try:
+        sq_conn = sqlite3.connect(sqlite_path)
+        sq_cursor = sq_conn.cursor()
+        
+        # Si TB_DICTIONARY n'existe pas, ce n'est pas un SQLite Autodesk valide
+        sq_cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='TB_DICTIONARY';")
+        if not sq_cursor.fetchone():
+            sq_conn.close()
+            return
+            
+        from convert_autodesk_to_postgis import (
+            get_autodesk_classes, 
+            get_fdo_column_metadata, 
+            get_spatial_metadata, 
+            get_physical_column_info,
+            FDO_TO_POSTGRES_TYPES
+        )
+        
+        classes = get_autodesk_classes(sq_conn)
+        fdo_meta = get_fdo_column_metadata(sq_conn)
+        spatial_meta = get_spatial_metadata(sq_conn)
+        
+        pg_cursor = pg_conn.cursor()
+        
+        for class_id, class_info in classes.items():
+            tbl_name = class_info["name"]
+            class_type = class_info["type"]
+            
+            # Vérifier si la table existe dans PostgreSQL (en respectant la casse exacte)
+            pg_cursor.execute(
+                "SELECT EXISTS (SELECT FROM information_schema.tables WHERE table_schema = 'public' AND table_name = %s);",
+                (tbl_name,)
+            )
+            table_exists = pg_cursor.fetchone()[0]
+            if not table_exists:
+                continue
+                
+            phys_cols = get_physical_column_info(sq_conn, tbl_name)
+            if not phys_cols:
+                continue
+                
+            pg_cursor.execute(
+                "SELECT column_name FROM information_schema.columns WHERE table_schema = 'public' AND table_name = %s;",
+                (tbl_name,)
+            )
+            pg_cols = {row[0].upper() for row in pg_cursor.fetchall()}
+            
+            tbl_spatial = spatial_meta.get(tbl_name.upper(), {})
+            
+            for col_upper, pinfo in phys_cols.items():
+                if col_upper in pg_cols:
+                    continue
+                    
+                col_name = pinfo["name"]
+                
+                # Cas d'une colonne géométrie
+                if col_upper == tbl_spatial.get("geom_col", "GEOM").upper() or (class_type in ['P', 'L', 'S'] and col_upper == "GEOM"):
+                    gtype = tbl_spatial.get("geom_type")
+                    if not gtype or gtype == "Geometry":
+                        if class_type == 'P': gtype = "Point"
+                        elif class_type == 'L': gtype = "LineString"
+                        elif class_type == 'S': gtype = "Polygon"
+                        else: gtype = "Geometry"
+                    srid = tbl_spatial.get("srid", default_srid)
+                    pg_type = f"geometry({gtype}, {srid})"
+                else:
+                    fmeta = fdo_meta.get((tbl_name.upper(), col_upper), {})
+                    fdo_dtype = fmeta.get("data_type")
+                    if fdo_dtype in FDO_TO_POSTGRES_TYPES:
+                        pg_type = FDO_TO_POSTGRES_TYPES[fdo_dtype]
+                        if pg_type == "varchar" and fmeta.get("length"):
+                            pg_type = f"varchar({fmeta['length']})"
+                    else:
+                        raw = pinfo["raw_type"].upper()
+                        if "INT" in raw: pg_type = "integer"
+                        elif "CHAR" in raw or "TEXT" in raw: pg_type = "text"
+                        elif "REAL" in raw or "DOUBLE" in raw or "FLOAT" in raw: pg_type = "double precision"
+                        else: pg_type = "text"
+                
+                print(f"[➕ ALTER TABLE] Attribut détecté en SQLite mais manquant en PostgreSQL : table '{tbl_name}', colonne '{col_name}' ({pg_type})")
+                alter_stmt = f'ALTER TABLE "{tbl_name}" ADD COLUMN "{col_name}" {pg_type}'
+                if pinfo["default"] is not None:
+                    alter_stmt += f" DEFAULT {pinfo['default']}"
+                
+                try:
+                    pg_cursor.execute(alter_stmt + ";")
+                    print(f"    └─ [✔] Colonne '{col_name}' ajoutée avec succès.")
+                except Exception as ex:
+                    print(f"    └─ [❌] Échec de l'ajout de la colonne '{col_name}' : {ex}")
+                    
+        pg_conn.commit()
+        sq_conn.close()
+    except Exception as e:
+        print(f"[⚠️] Note lors de la synchronisation dynamique des colonnes : {e}")
 
 
 def ensure_pg_database_exists(host="localhost", port=5432, user="postgres", password="", dbname="autocad_test"):
@@ -401,6 +522,16 @@ def run_conversion_and_apply(sqlite_path: str, output_sql: str, pg_host="localho
                 
                 print("\n[📊 DÉBUT D'APPLICATION DU SCHÉMA EN BASE POSTGRESQL]")
                 
+                # Récupération de l'état actuel de la base PostgreSQL pour n'afficher que les nouveautés
+                cursor.execute("SELECT table_name FROM information_schema.tables WHERE table_schema = 'public';")
+                existing_pg_tables = {row[0].upper() for row in cursor.fetchall()}
+                
+                cursor.execute("SELECT indexname FROM pg_indexes WHERE schemaname = 'public';")
+                existing_pg_indexes = {row[0].upper() for row in cursor.fetchall()}
+                
+                cursor.execute("SELECT trigger_name FROM information_schema.triggers WHERE trigger_schema = 'public';")
+                existing_pg_triggers = {row[0].upper() for row in cursor.fetchall()}
+                
                 for stmt_clean in split_sql_statements(sql_content):
                     stmt_upper = stmt_clean.upper()
                     try:
@@ -408,32 +539,37 @@ def run_conversion_and_apply(sqlite_path: str, output_sql: str, pg_host="localho
                         conn.commit()
                         success_count += 1
 
-                        # Détection du type de requête pour affichage détaillé
+                        # Détection du type de requête pour affichage détaillé (uniquement si l'élément n'existait pas)
                         if "CREATE TABLE IF NOT EXISTS" in stmt_upper or "CREATE TABLE" in stmt_upper:
                             parts = stmt_clean.split('"')
                             tname = parts[1] if len(parts) > 1 else "Table"
-                            if tname.endswith("_TBD") or tname == "TB_DOMAIN":
-                                if tname not in created_domains:
+                            tname_upper = tname.upper()
+                            if tname_upper not in existing_pg_tables:
+                                existing_pg_tables.add(tname_upper)
+                                if tname.endswith("_TBD") or tname == "TB_DOMAIN":
                                     created_domains.append(tname)
-                                    print(f"    [📦 Table Domaine]  '{tname}' créée")
-                            else:
-                                if tname not in created_tables:
+                                    print(f"    [📦 Table Domaine]  '{tname}' créée (nouvelle)")
+                                else:
                                     created_tables.append(tname)
-                                    print(f"    [✨ Feature Class]  '{tname}' créée")
+                                    print(f"    [✨ Feature Class]  '{tname}' créée (nouvelle)")
                         elif "CREATE INDEX" in stmt_upper:
                             parts = stmt_clean.split('"')
                             idx_name = parts[1] if len(parts) > 1 else "Index"
-                            if idx_name not in created_indexes:
+                            idx_upper = idx_name.upper()
+                            if idx_upper not in existing_pg_indexes:
+                                existing_pg_indexes.add(idx_upper)
                                 created_indexes.append(idx_name)
-                                print(f"    [🗺️ Index Spatial]  '{idx_name}' créé")
+                                print(f"    [🗺️ Index Spatial]  '{idx_name}' créé (nouveau)")
                         elif "FOREIGN KEY" in stmt_upper:
                             created_fks += 1
                         elif "CREATE TRIGGER" in stmt_upper:
                             parts = stmt_clean.split('"')
                             trg_name = parts[1] if len(parts) > 1 else "Trigger"
-                            if trg_name not in created_triggers:
+                            trg_upper = trg_name.upper()
+                            if trg_upper not in existing_pg_triggers:
+                                existing_pg_triggers.add(trg_upper)
                                 created_triggers.append(trg_name)
-                                print(f"    [⚡ Trigger PL/pgSQL] '{trg_name}' activé")
+                                print(f"    [⚡ Trigger PL/pgSQL] '{trg_name}' activé (nouveau)")
                     except Exception as ex:
                         conn.rollback()
                         first_line = stmt_clean.splitlines()[0][:120]
@@ -441,6 +577,10 @@ def run_conversion_and_apply(sqlite_path: str, output_sql: str, pg_host="localho
                         print(f"    [❌ SQL] {first_line}")
                         print(f"         -> {ex}")
                             
+                # Lancement de la synchronisation dynamique des colonnes (ALTER TABLE)
+                print("\n[🔄 SYNCHRONISATION DES ATTRIBUTS]")
+                sync_table_columns(sqlite_path, conn, srid)
+                
                 cursor.close()
                 conn.close()
                 
