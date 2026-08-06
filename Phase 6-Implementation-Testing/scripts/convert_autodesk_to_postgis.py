@@ -8,21 +8,17 @@ PHASE   : Phase 5 -- Target Architecture (Approach A) -- V2
 ===============================================================================
 
 DESCRIPTION:
-This script reads a SQLite file exported from Autodesk Infrastructure Administrator,
-analyzes the 6 Autodesk-specific metadata catalogs identified during Phase 3
+This script acts as the core DDL translation engine. It parses an Autodesk 
+Industry Model SQLite file exported from Autodesk Infrastructure Administrator,
+analyzes the 6 core Autodesk metadata catalog tables identified during Phase 3
 (TB_DICTIONARY, TB_ATTRIBUTE, fdo_columns, geometry_columns, TB_DOMAIN, TB_RELATIONS),
-and generates a complete PostgreSQL/PostGIS DDL SQL script with:
-- Feature classes & exact FDO types
-- PostGIS geometries (Point, LineString, Polygon) & GiST spatial indexes
-- Domain tables (_TBD) and automatic value population
-- Foreign keys (FOREIGN KEY) between classes and to domains
-- PL/pgSQL triggers for automatic calculations (e.g. ST_Length)
-
-V2 IMPROVEMENTS:
-- Structured logging (replaces all print statements)
-- Cardinality of relations (MERGE_MODE / SPLIT_MODE / CARDINALITY)
-- Multiple inheritance validation
-- Log file support (--log-file)
+and generates a production-ready PostgreSQL / PostGIS DDL SQL script containing:
+- Feature class tables with exact FDO-to-PostgreSQL data type mapping
+- PostGIS spatial geometry columns (Point, LineString, Polygon) and GiST spatial indexes
+- Domain value tables (_TBD) populated with domain values (ON CONFLICT DO NOTHING)
+- Foreign key constraints (FOREIGN KEY) for class-to-class and class-to-domain relations
+- PL/pgSQL triggers for automated spatial attribute calculations (e.g. ST_Length)
+- Multiple inheritance resolution and column collision prefixing
 
 ===============================================================================
 """
@@ -35,7 +31,7 @@ from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
-# Force UTF-8 encoding for Windows console to avoid charmap errors
+# Force UTF-8 encoding for Windows console to avoid charmap encoding errors
 if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 if hasattr(sys.stderr, "reconfigure"):
@@ -48,6 +44,10 @@ if hasattr(sys.stderr, "reconfigure"):
 def setup_logging(log_file=None, verbose=False):
     """
     Configures the root logger with console and optional file output.
+    
+    Args:
+        log_file (str, optional): Path to output log file.
+        verbose (bool): If True, enables DEBUG log level; otherwise INFO level.
     """
     level = logging.DEBUG if verbose else logging.INFO
     fmt = "%(asctime)s - %(levelname)s - %(message)s"
@@ -58,22 +58,25 @@ def setup_logging(log_file=None, verbose=False):
 
 
 # =============================================================================
-# 1. TYPE MAPPING TABLE (FDO -> POSTGRESQL)
+# 1. TYPE MAPPING TABLES (FDO & OGC -> POSTGRESQL / POSTGIS)
 # =============================================================================
+
+# Maps Autodesk FDO (Feature Data Objects) data type integer IDs to PostgreSQL data types
 FDO_TO_POSTGRES_TYPES = {
-    1: "boolean",           # FDO Boolean
-    2: "smallint",          # FDO Byte
-    3: "double precision",  # FDO Double (e.g. LENGTH, ORIENTATION)
-    4: "numeric",           # FDO Decimal
-    5: "smallint",          # FDO Int16
-    6: "integer",           # FDO Int32
-    7: "integer",           # FDO Int64 / Number
-    9: "varchar",           # FDO String / Text
-    10: "timestamp",        # FDO DateTime
-    11: "date",             # FDO Date
-    13: "bytea"             # FDO BLOB
+    1: "boolean",           # FDO Boolean -> PostgreSQL boolean
+    2: "smallint",          # FDO Byte -> PostgreSQL smallint
+    3: "double precision",  # FDO Double (e.g. LENGTH, ORIENTATION) -> double precision
+    4: "numeric",           # FDO Decimal -> PostgreSQL numeric
+    5: "smallint",          # FDO Int16 -> PostgreSQL smallint
+    6: "integer",           # FDO Int32 -> PostgreSQL integer
+    7: "integer",           # FDO Int64 / Number -> PostgreSQL integer
+    9: "varchar",           # FDO String / Text -> PostgreSQL varchar
+    10: "timestamp",        # FDO DateTime -> PostgreSQL timestamp
+    11: "date",             # FDO Date -> PostgreSQL date
+    13: "bytea"             # FDO BLOB / Binary -> PostgreSQL bytea
 }
 
+# Maps OGC Geometry integer type IDs to PostGIS Geometry type strings
 GEOM_TYPE_MAP = {
     1: "Point",
     2: "LineString",
@@ -85,13 +88,24 @@ GEOM_TYPE_MAP = {
 
 
 # =============================================================================
-# 2. AUTODESK DATA MODEL READING FUNCTIONS (PHASE 3)
+# 2. AUTODESK DATA MODEL METADATA CATALOG READERS
 # =============================================================================
 
-def find_col_name(cursor, table_name: str, candidates: list):
+def find_col_name(cursor: sqlite3.Cursor, table_name: str, candidates: list):
     """
-    Dynamically inspects the columns of a SQLite table to find the exact name
-    of a column among a list of candidates.
+    Dynamically inspects the physical columns of a SQLite metadata table to find
+    the exact column name from a list of candidate names.
+    
+    This handles naming variations across different versions of Autodesk Infrastructure
+    Administrator schema exports (e.g. 'f_class_id' vs 'class_id' vs 'id').
+
+    Args:
+        cursor (sqlite3.Cursor): Active SQLite cursor.
+        table_name (str): Name of the SQLite table to inspect.
+        candidates (list): List of potential column name strings.
+
+    Returns:
+        str or None: The actual column name found in the table, or None if no match.
     """
     try:
         cursor.execute(f'PRAGMA table_info("{table_name}");')
@@ -106,11 +120,25 @@ def find_col_name(cursor, table_name: str, candidates: list):
     return None
 
 
-def get_autodesk_classes(conn: sqlite3.Connection):
+def get_autodesk_classes(conn: sqlite3.Connection) -> dict:
     """
-    Queries TB_DICTIONARY (master class catalog).
-    Dynamically detects column names.
-    Also detects MODEL_F_CLASS_ID for multiple inheritance support.
+    Queries `TB_DICTIONARY` (the master Autodesk class catalog) to discover all feature
+    classes, their unique class IDs, table names, class types (Point, Line, Polygon, Alpha),
+    captions, and parent class IDs for inheritance hierarchy.
+
+    Args:
+        conn (sqlite3.Connection): SQLite database connection.
+
+    Returns:
+        dict: Mapping of class_id -> {
+            "name": str (table name),
+            "type": str (class type code),
+            "caption": str (human-readable label),
+            "parent_id": int/str (parent class ID for inheritance)
+        }
+
+    Raises:
+        ValueError: If `TB_DICTIONARY` is absent or the class name column cannot be identified.
     """
     cursor = conn.cursor()
     cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='TB_DICTIONARY';")
@@ -147,12 +175,17 @@ def get_autodesk_classes(conn: sqlite3.Connection):
 
 def resolve_inheritance(classes: dict, conn: sqlite3.Connection) -> dict:
     """
-    Resolves multiple inheritance: detects if a class has multiple parents
-    and merges their column sets.
-    Returns a dict: {class_id: [parent_class_id_1, parent_class_id_2, ...]}
+    Builds an inheritance mapping tree. Detects whether a child class inherits from
+    one or multiple parent classes (multiple inheritance support).
+
+    Args:
+        classes (dict): Master class dictionary returned by `get_autodesk_classes`.
+        conn (sqlite3.Connection): SQLite connection.
+
+    Returns:
+        dict: Mapping of child_class_id -> list of parent_class_ids.
     """
     inheritance_map = {}
-    # Build child -> list of parents
     for class_id, info in classes.items():
         parent_id = info.get("parent_id")
         if parent_id is not None and parent_id != class_id:
@@ -160,8 +193,7 @@ def resolve_inheritance(classes: dict, conn: sqlite3.Connection) -> dict:
                 inheritance_map[class_id] = []
             inheritance_map[class_id].append(parent_id)
 
-    # Check for multiple inheritance (same F_CLASS_ID with different parents)
-    # In some Autodesk models, a class can inherit from multiple parents
+    # Validate and log multiple inheritance occurrences
     multi_inherit = {cid: parents for cid, parents in inheritance_map.items() if len(parents) > 1}
     if multi_inherit:
         for cid, parents in multi_inherit.items():
@@ -177,15 +209,23 @@ def resolve_inheritance(classes: dict, conn: sqlite3.Connection) -> dict:
 
 def get_inherited_columns(class_id, classes: dict, inheritance_map: dict, conn: sqlite3.Connection) -> dict:
     """
-    Returns the merged physical columns from all parent classes for a given class.
-    Handles column name conflicts across multiple parent classes by prefixing
-    conflicting column names with the parent table name (e.g. PARENT_A_ID, PARENT_B_ID)
-    and logging an explicit warning.
+    Retrieves and merges physical column definitions inherited from parent classes.
+    Resolves naming collisions between multiple parent classes by prefixing conflicting
+    columns with the parent table name (e.g. `PARENT_A_ID`, `PARENT_B_ID`).
+
+    Args:
+        class_id: The ID of the child feature class.
+        classes (dict): Master class dictionary.
+        inheritance_map (dict): Child-to-parents inheritance dictionary.
+        conn (sqlite3.Connection): SQLite database connection.
+
+    Returns:
+        dict: Merged dictionary of column metadata inherited from parents.
     """
     parent_ids = inheritance_map.get(class_id, [])
     child_name = classes.get(class_id, {}).get("name", str(class_id))
     merged_cols = {}
-    seen_col_sources = {}  # col_key -> parent_name
+    seen_col_sources = {}  # col_key -> parent_table_name
 
     for pid in parent_ids:
         parent_info = classes.get(pid)
@@ -197,8 +237,7 @@ def get_inherited_columns(class_id, classes: dict, inheritance_map: dict, conn: 
                 if col_key in merged_cols:
                     first_parent = seen_col_sources[col_key]
 
-                    # If types/definitions match completely, we can keep the column or rename
-                    # Renaming avoids any ambiguity in PostgreSQL
+                    # Collision detected: rename both occurrences to avoid ambiguity
                     renamed_first_key = f"{first_parent.upper()}_{col_key}"
                     renamed_current_key = f"{parent_name.upper()}_{col_key}"
 
@@ -210,13 +249,13 @@ def get_inherited_columns(class_id, classes: dict, inheritance_map: dict, conn: 
                         renamed_first_key, renamed_current_key
                     )
 
-                    # Re-key first parent's column if not already re-keyed
+                    # Update first parent column key and name
                     if col_key in merged_cols:
                         first_col_info = merged_cols.pop(col_key)
                         first_col_info["name"] = f"{first_parent}_{first_col_info['name']}"
                         merged_cols[renamed_first_key] = first_col_info
 
-                    # Add current parent's column with prefix
+                    # Add current parent column with table prefix
                     new_col_info = dict(col_info)
                     new_col_info["name"] = f"{parent_name}_{col_info['name']}"
                     merged_cols[renamed_current_key] = new_col_info
@@ -227,10 +266,17 @@ def get_inherited_columns(class_id, classes: dict, inheritance_map: dict, conn: 
     return merged_cols
 
 
-def get_fdo_column_metadata(conn: sqlite3.Connection):
+def get_fdo_column_metadata(conn: sqlite3.Connection) -> dict:
     """
-    Queries fdo_columns (FDO dictionary).
-    Dynamically detects column names to avoid any failure.
+    Queries `fdo_columns` (the FDO dictionary) to extract exact FDO data types,
+    string lengths, and numeric precision for all feature class attributes.
+
+    Returns:
+        dict: Keyed by `(TABLE_NAME_UPPER, COLUMN_NAME_UPPER)` -> {
+            "data_type": int (FDO type code),
+            "length": int,
+            "precision": int
+        }
     """
     cursor = conn.cursor()
     fdo_meta = {}
@@ -258,10 +304,17 @@ def get_fdo_column_metadata(conn: sqlite3.Connection):
     return fdo_meta
 
 
-def get_spatial_metadata(conn: sqlite3.Connection):
+def get_spatial_metadata(conn: sqlite3.Connection) -> dict:
     """
-    Queries geometry_columns (OGC spatial catalog).
-    Dynamically detects column names.
+    Queries `geometry_columns` (the OGC spatial metadata catalog table) to determine
+    the spatial geometry column name, geometry type, and SRID for each spatial table.
+
+    Returns:
+        dict: Keyed by `TABLE_NAME_UPPER` -> {
+            "geom_col": str (e.g. 'GEOM'),
+            "geom_type": str (e.g. 'LineString'),
+            "srid": int (e.g. 2154)
+        }
     """
     cursor = conn.cursor()
     spatial_meta = {}
@@ -288,9 +341,23 @@ def get_spatial_metadata(conn: sqlite3.Connection):
     return spatial_meta
 
 
-def get_physical_column_info(conn: sqlite3.Connection, table_name: str):
+def get_physical_column_info(conn: sqlite3.Connection, table_name: str) -> dict:
     """
-    Queries PRAGMA table_info(table) from SQLite.
+    Queries SQLite `PRAGMA table_info(table)` to retrieve physical column names,
+    raw data types, NOT NULL constraints, default values, and primary key flags.
+
+    Args:
+        conn (sqlite3.Connection): SQLite database connection.
+        table_name (str): Physical table name in SQLite.
+
+    Returns:
+        dict: Mapping of COLUMN_NAME_UPPER -> {
+            "name": str,
+            "raw_type": str,
+            "notnull": bool,
+            "default": str/None,
+            "pk": bool
+        }
     """
     cursor = conn.cursor()
     try:
@@ -311,11 +378,22 @@ def get_physical_column_info(conn: sqlite3.Connection, table_name: str):
         return {}
 
 
-def get_autodesk_relations(conn: sqlite3.Connection):
+def get_autodesk_relations(conn: sqlite3.Connection) -> list:
     """
-    Queries TB_RELATIONS (inter-class and class-domain relationship catalog).
-    Dynamically detects column names, including cardinality columns
+    Queries `TB_RELATIONS` (the relationship catalog) to extract foreign key links
+    between feature classes and to domain lookup tables. Also extracts cardinality metadata
     (MERGE_MODE, SPLIT_MODE, CARDINALITY, RELATION_TYPE).
+
+    Returns:
+        list of dict: List of relation objects -> {
+            "parent": str,
+            "child": str,
+            "fk_col": str,
+            "merge_mode": str (optional),
+            "split_mode": str (optional),
+            "cardinality": str (optional),
+            "relation_type": str (optional)
+        }
     """
     cursor = conn.cursor()
     relations = []
@@ -326,7 +404,6 @@ def get_autodesk_relations(conn: sqlite3.Connection):
         c_col = find_col_name(cursor, "TB_RELATIONS", ["child_table_name", "child_table", "child_class_name", "child_name", "table_name_child"])
         fk_col = find_col_name(cursor, "TB_RELATIONS", ["fk_column_name", "fk_column", "foreign_key", "fk_name", "column_name", "fk_field"])
 
-        # V2: Detect cardinality-related columns
         merge_col = find_col_name(cursor, "TB_RELATIONS", ["merge_mode", "mergemode"])
         split_col = find_col_name(cursor, "TB_RELATIONS", ["split_mode", "splitmode"])
         card_col = find_col_name(cursor, "TB_RELATIONS", ["cardinality", "relation_cardinality"])
@@ -353,15 +430,10 @@ def get_autodesk_relations(conn: sqlite3.Connection):
                             "child": str(child).strip(),
                             "fk_col": str(fk).strip() if fk else f"{str(parent).strip()}_ID"
                         }
-                        # V2: Add cardinality info if available
-                        if merge is not None:
-                            rel["merge_mode"] = str(merge).strip()
-                        if split is not None:
-                            rel["split_mode"] = str(split).strip()
-                        if card is not None:
-                            rel["cardinality"] = str(card).strip()
-                        if reltype is not None:
-                            rel["relation_type"] = str(reltype).strip()
+                        if merge is not None: rel["merge_mode"] = str(merge).strip()
+                        if split is not None: rel["split_mode"] = str(split).strip()
+                        if card is not None: rel["cardinality"] = str(card).strip()
+                        if reltype is not None: rel["relation_type"] = str(reltype).strip()
                         relations.append(rel)
             except Exception as e:
                 logger.error("Error reading TB_RELATIONS: %s", e, exc_info=True)
@@ -370,25 +442,30 @@ def get_autodesk_relations(conn: sqlite3.Connection):
 
 def get_pk_column_name(conn: sqlite3.Connection, table_name: str) -> str:
     """
-    Returns the actual primary key column name of a SQLite table.
-    Looks first for FID, then ID, then the first PK column from PRAGMA.
+    Identifies the exact primary key column name for a SQLite table.
+    Prioritizes explicit PK flags from PRAGMA table_info, defaulting to 'FID'.
     """
     cursor = conn.cursor()
     try:
         cursor.execute(f'PRAGMA table_info("{table_name}");')
-        pk_cols = [(row[1], row[5]) for row in cursor.fetchall() if row[5] > 0]  # row[5] = pk flag
+        pk_cols = [(row[1], row[5]) for row in cursor.fetchall() if row[5] > 0]
         if pk_cols:
-            pk_name = pk_cols[0][0]
-            return pk_name
+            return pk_cols[0][0]
     except Exception as e:
         logger.debug("Could not determine PK for '%s': %s", table_name, e)
-    return "FID"  # Fallback
+    return "FID"
 
 
-def get_domain_tables(conn: sqlite3.Connection):
+def get_domain_tables(conn: sqlite3.Connection) -> dict:
     """
-    Identifies all domain tables (e.g. tables ending with _TBD or present in TB_DOMAIN).
-    Retrieves their columns and records (domain values).
+    Finds all domain lookup tables (ending with `_TBD` or starting with `TB_DOM_`).
+    Reads their physical schema and all stored records (enumerated domain values).
+
+    Returns:
+        dict: Mapping of domain_table_name -> {
+            "columns": list of column names,
+            "rows": list of tuples representing data rows
+        }
     """
     cursor = conn.cursor()
     domain_tables = {}
@@ -419,18 +496,24 @@ def get_domain_tables(conn: sqlite3.Connection):
 
 def generate_postgis_ddl(sqlite_path: str, default_srid: int = 2154) -> str:
     """
-    Main conversion function.
-    Reads the Autodesk SQLite and builds the final DDL SQL script.
+    Core translation coordinator. Reads the Autodesk SQLite file, parses all metadata catalogs,
+    and generates a complete PostGIS DDL script formatted as valid SQL.
+
+    Args:
+        sqlite_path (str): Path to the source Autodesk SQLite file.
+        default_srid (int): Default PostGIS Spatial Reference Identifier (EPSG code, default: 2154).
+
+    Returns:
+        str: Fully rendered SQL script content ready for execution in PostgreSQL.
     """
     conn = sqlite3.connect(sqlite_path)
 
+    # Step 1: Read all metadata catalogs
     classes = get_autodesk_classes(conn)
     fdo_meta = get_fdo_column_metadata(conn)
     spatial_meta = get_spatial_metadata(conn)
     relations = get_autodesk_relations(conn)
     domain_tables = get_domain_tables(conn)
-
-    # V2: Resolve inheritance
     inheritance_map = resolve_inheritance(classes, conn)
 
     ddl_lines = []
@@ -442,7 +525,7 @@ def generate_postgis_ddl(sqlite_path: str, default_srid: int = 2154) -> str:
     ddl_lines.append("CREATE EXTENSION IF NOT EXISTS postgis;\n")
 
     # -------------------------------------------------------------------------
-    # A. Domain tables (_TBD) generation & value insertion (Tests 10.1, 11)
+    # A. Domain Value Tables (_TBD) Generation & Initial Data Population
     # -------------------------------------------------------------------------
     if domain_tables:
         ddl_lines.append("-- ============================================================")
@@ -477,7 +560,7 @@ def generate_postgis_ddl(sqlite_path: str, default_srid: int = 2154) -> str:
             ddl_lines.append("")
 
     # -------------------------------------------------------------------------
-    # B. Feature class (business tables) generation
+    # B. Feature Classes (Business Tables & PostGIS Geometry Columns)
     # -------------------------------------------------------------------------
     ddl_lines.append("-- ============================================================")
     ddl_lines.append("-- 2. FEATURE CLASSES (BUSINESS TABLES AND POSTGIS GEOMETRIES)")
@@ -490,7 +573,7 @@ def generate_postgis_ddl(sqlite_path: str, default_srid: int = 2154) -> str:
         class_type = class_info["type"]
         caption = class_info["caption"]
 
-        # Skip domain tables already created in section A
+        # Skip domain tables already handled in Section A
         if tbl_name in domain_tables or tbl_name.upper().endswith("_TBD"):
             continue
 
@@ -504,16 +587,14 @@ def generate_postgis_ddl(sqlite_path: str, default_srid: int = 2154) -> str:
         else:
             phys_cols = {}
 
-        # V2: Merge inherited columns from all parents
+        # Merge inherited columns from all parents
         inherited_cols = get_inherited_columns(class_id, classes, inheritance_map, conn)
         for col_key, col_info in inherited_cols.items():
             if col_key not in phys_cols:
                 phys_cols[col_key] = col_info
-                logger.debug(
-                    "Inherited column '%s' added to class '%s' from parent",
-                    col_info["name"], tbl_name
-                )
+                logger.debug("Inherited column '%s' added to class '%s'", col_info["name"], tbl_name)
 
+        # Fallback column structure if table is empty in SQLite
         if not phys_cols:
             phys_cols = {
                 "FID": {"name": "FID", "raw_type": "INTEGER", "notnull": True, "default": None, "pk": True}
@@ -593,15 +674,17 @@ def generate_postgis_ddl(sqlite_path: str, default_srid: int = 2154) -> str:
         ddl_lines.append(",\n".join(column_defs))
         ddl_lines.append(");\n")
 
+        # Create GiST spatial index on PostGIS geometry column
         for gcol, tname in spatial_columns_to_index:
             idx_name = f"idx_{tname}_{gcol}_gist"
             ddl_lines.append(f'CREATE INDEX IF NOT EXISTS "{idx_name}" ON "{tname}" USING GIST ("{gcol}");\n')
 
+        # Register table for length calculation trigger if LineString with LENGTH column
         if class_type == 'L' and has_length_col:
             triggers_to_generate.append((tbl_name, geom_col_name))
 
     # -------------------------------------------------------------------------
-    # C. Foreign key creation (inter-class & domain relations) (Tests 9, 10.2)
+    # C. Foreign Keys & Relations (TB_RELATIONS)
     # -------------------------------------------------------------------------
     if relations:
         ddl_lines.append("-- ============================================================")
@@ -612,10 +695,8 @@ def generate_postgis_ddl(sqlite_path: str, default_srid: int = 2154) -> str:
             child = rel["child"]
             fk_col = rel["fk_col"]
 
-            # Check if the child table and FK column actually exist in the database
             child_cols = get_physical_column_info(conn, child)
             if not child_cols:
-                # Try case-insensitive table name lookup
                 cursor = conn.cursor()
                 cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND LOWER(name) = LOWER(?);", (child,))
                 row = cursor.fetchone()
@@ -626,23 +707,18 @@ def generate_postgis_ddl(sqlite_path: str, default_srid: int = 2154) -> str:
                 continue
 
             fk_constraint_name = f"fk_{child}_{fk_col}_{parent}"
-            # Dynamically detect the PK of the parent table (FID for classes, ID for domains)
             parent_pk = get_pk_column_name(conn, parent)
             ddl_lines.append(
                 f'ALTER TABLE "{child}" ADD CONSTRAINT "{fk_constraint_name}" '
                 f'FOREIGN KEY ("{fk_col}") REFERENCES "{parent}" ("{parent_pk}") ON DELETE SET NULL;'
             )
 
-            # V2: Add cardinality comment if available
+            # Document cardinality in PostgreSQL constraint comment
             comment_parts = []
-            if "cardinality" in rel:
-                comment_parts.append(f"Cardinality: {rel['cardinality']}")
-            if "merge_mode" in rel:
-                comment_parts.append(f"MergeMode: {rel['merge_mode']}")
-            if "split_mode" in rel:
-                comment_parts.append(f"SplitMode: {rel['split_mode']}")
-            if "relation_type" in rel:
-                comment_parts.append(f"RelationType: {rel['relation_type']}")
+            if "cardinality" in rel: comment_parts.append(f"Cardinality: {rel['cardinality']}")
+            if "merge_mode" in rel: comment_parts.append(f"MergeMode: {rel['merge_mode']}")
+            if "split_mode" in rel: comment_parts.append(f"SplitMode: {rel['split_mode']}")
+            if "relation_type" in rel: comment_parts.append(f"RelationType: {rel['relation_type']}")
             if comment_parts:
                 comment_text = "; ".join(comment_parts).replace("'", "''")
                 ddl_lines.append(
@@ -651,7 +727,7 @@ def generate_postgis_ddl(sqlite_path: str, default_srid: int = 2154) -> str:
         ddl_lines.append("")
 
     # -------------------------------------------------------------------------
-    # D. PL/pgSQL trigger generation (automatic ST_Length calculations)
+    # D. PL/pgSQL Triggers for Automatic Calculations (ST_Length)
     # -------------------------------------------------------------------------
     if triggers_to_generate:
         ddl_lines.append("-- ============================================================")

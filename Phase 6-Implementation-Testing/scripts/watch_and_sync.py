@@ -3,27 +3,29 @@
 """
 ===============================================================================
 PROJECT : Autocad-map-3d-PostgreSQL-Connector
-MODULE  : Background automation and monitoring service (File Watcher)
-PHASE   : Phase 5 -- Automation of relaunch (A + E) -- V2
+MODULE  : Background Automation & Multi-Model Synchronization Service (File Watcher)
+PHASE   : Phase 6 -- Implementation & Testing (Multi-Model & Physical Deletion)
 ===============================================================================
 
 DESCRIPTION:
-This script operates as a background service/daemon.
-It monitors in real-time the SQLite Data Model file (`datamodel.sqlite`).
+This script operates as an automated background service (daemon). It monitors 
+Autodesk Industry Model SQLite database files (`*.sqlite` / `datamodel.sqlite`)
+in real-time across target directories (such as `%TEMP%` or custom paths).
 
-As soon as the administrator modifies and saves the Data Model in
-Autodesk Infrastructure Administrator:
-1. The script instantly detects the modification of the SQLite file.
-2. It automatically re-executes the Python converter `convert_autodesk_to_postgis.py`.
-3. It automatically creates the PostgreSQL database if it does not exist.
-4. It automatically applies the updated DDL to the PostgreSQL database (via psycopg2).
-
-V2 IMPROVEMENTS:
-- Structured logging (replaces all print statements)
-- Schema diff report (orphan column detection)
-- Data synchronization (--sync-data with upsert)
-- Watchdog-based file monitoring with polling fallback
-- Log file support (--log-file)
+Workflow & Core Architecture:
+1. Real-time Detection: Uses event-driven Watchdog (or fallback Polling) to detect 
+   when Autodesk Infrastructure Administrator creates, updates, or modifies Data Models.
+2. Dynamic DDL Generation: Executes `convert_autodesk_to_postgis.py` to compile 
+   Autodesk metadata catalogs into production-ready PostGIS DDL scripts.
+3. PostgreSQL Database Creation: Automatically provisions PostgreSQL databases matching 
+   the Autodesk Industry Model names (`industry_model_name` -> `industry_model_name`).
+4. Schema & Data Synchronization:
+   - Applies table creations, geometry columns, GiST spatial indexes, domain tables, PL/pgSQL triggers.
+   - Dynamic Column Sync: Adds missing attributes via `ALTER TABLE ADD COLUMN`.
+   - Physical Deletion Sync: Automatically drops tables (`DROP TABLE CASCADE`) and columns 
+     (`ALTER TABLE DROP COLUMN`) removed from the Data Model.
+   - Upsert Data Sync: Performs incremental data sync (`INSERT ON CONFLICT DO UPDATE`) 
+     with WKB-to-PostGIS spatial geometry conversions.
 
 ===============================================================================
 """
@@ -42,13 +44,13 @@ from datetime import datetime
 
 logger = logging.getLogger(__name__)
 
-# Force UTF-8 encoding for Windows console to avoid charmap errors
+# Force UTF-8 encoding for Windows console to avoid charmap encoding errors
 if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 if hasattr(sys.stderr, "reconfigure"):
     sys.stderr.reconfigure(encoding="utf-8", errors="replace")
 
-# Check interval in seconds (used for polling fallback)
+# Check interval in seconds (used for polling fallback mode)
 CHECK_INTERVAL_SECONDS = 2
 
 # =============================================================================
@@ -57,7 +59,11 @@ CHECK_INTERVAL_SECONDS = 2
 
 def setup_logging(log_file=None, verbose=False):
     """
-    Configures the root logger with console and optional file output.
+    Configures the root logger with console stdout handler and optional file handler.
+
+    Args:
+        log_file (str, optional): Path to output log file.
+        verbose (bool): If True, sets logging level to DEBUG; otherwise INFO.
     """
     level = logging.DEBUG if verbose else logging.INFO
     fmt = "%(asctime)s - %(levelname)s - %(message)s"
@@ -68,15 +74,22 @@ def setup_logging(log_file=None, verbose=False):
 
 
 # =============================================================================
-# 1. SQL STATEMENT SPLITTING (unchanged logic, cleaned logging)
+# 1. SQL STATEMENT PARSER & SPLITTER
 # =============================================================================
 
 def split_sql_statements(sql_content: str):
     """
-    Splits a SQL script into executable statements without breaking:
-    - SQL comments (`--` and `/* ... */`)
-    - Single-quoted strings / quoted identifiers
-    - PL/pgSQL blocks delimited by $$ ... $$ or $tag$ ... $tag$
+    Parses a multi-statement SQL script into individual executable queries.
+    Uses a robust state machine that preserves:
+    - Single line `--` and multi-line `/* ... */` SQL comments
+    - Single-quoted string literals and double-quoted identifiers
+    - PL/pgSQL dollar-quoted blocks (`$$ ... $$` or `$tag$ ... $tag$`)
+
+    Args:
+        sql_content (str): Full SQL script text.
+
+    Returns:
+        list of str: List of clean, standalone SQL queries.
     """
     statements = []
     buffer = []
@@ -92,12 +105,14 @@ def split_sql_statements(sql_content: str):
         ch = sql_content[i]
         nxt = sql_content[i + 1] if i + 1 < length else ""
 
+        # Skip line comments
         if in_line_comment:
             if ch == "\n":
                 in_line_comment = False
             i += 1
             continue
 
+        # Skip block comments
         if in_block_comment:
             if ch == "*" and nxt == "/":
                 in_block_comment = False
@@ -106,6 +121,7 @@ def split_sql_statements(sql_content: str):
                 i += 1
             continue
 
+        # Handle PL/pgSQL dollar tags (e.g. $$ or $body$)
         if dollar_tag is not None:
             if sql_content.startswith(dollar_tag, i):
                 buffer.append(dollar_tag)
@@ -116,6 +132,7 @@ def split_sql_statements(sql_content: str):
                 i += 1
             continue
 
+        # Handle single-quoted strings (escape quotes via '')
         if in_single:
             buffer.append(ch)
             if ch == "'" and nxt == "'":
@@ -127,6 +144,7 @@ def split_sql_statements(sql_content: str):
             i += 1
             continue
 
+        # Handle double-quoted identifiers
         if in_double:
             buffer.append(ch)
             if ch == '"':
@@ -134,6 +152,7 @@ def split_sql_statements(sql_content: str):
             i += 1
             continue
 
+        # Check comment starts
         if ch == "-" and nxt == "-":
             in_line_comment = True
             i += 2
@@ -144,6 +163,7 @@ def split_sql_statements(sql_content: str):
             i += 2
             continue
 
+        # Check string starts
         if ch == "'":
             in_single = True
             buffer.append(ch)
@@ -156,6 +176,7 @@ def split_sql_statements(sql_content: str):
             i += 1
             continue
 
+        # Detect dollar-tag entry point
         if ch == "$":
             end = sql_content.find("$", i + 1)
             if end != -1:
@@ -166,6 +187,7 @@ def split_sql_statements(sql_content: str):
                     i = end + 1
                     continue
 
+        # Statement terminator ';'
         if ch == ";":
             stmt = "".join(buffer).strip()
             if stmt:
@@ -185,10 +207,10 @@ def split_sql_statements(sql_content: str):
 
 
 # =============================================================================
-# 2. AUTODESK SQLITE DETECTION & FILE SEARCH
+# 2. AUTODESK SQLITE DISCOVERY & VALIDATION PIPELINE
 # =============================================================================
 
-# Extensions that can never be an Autodesk SQLite -> immediate rejection without reading
+# File extensions that are immediately rejected without reading
 _NON_SQLITE_EXTS = {
     ".txt", ".log", ".png", ".jpg", ".jpeg", ".gif", ".bmp", ".ico",
     ".xml", ".json", ".html", ".htm", ".css", ".js", ".ts",
@@ -200,16 +222,28 @@ _NON_SQLITE_EXTS = {
     ".tmp", ".temp", ".lock", ".pid",
 }
 
-# Magic signature of any SQLite3 file (first 16 bytes)
+# 16-byte SQLite binary magic signature
 _SQLITE_MAGIC = b"SQLite format 3\x00"
 
-_ANALYZED_SQLITES = {}  # file_path -> (mtime, is_valid)
+# File validation cache: file_path -> (mtime, is_valid)
+_ANALYZED_SQLITES = {}
 
 
 def is_autodesk_sqlite(file_path: str) -> bool:
     """
-    Checks if a SQLite file is a valid Autodesk Data Model.
-    Uses an mtime-based cache to avoid re-reading the file unnecessarily.
+    4-level validation algorithm to verify if a file is an Autodesk Data Model:
+    - Level 1: File extension filter (reject non-database files immediately).
+    - Level 2: Filename filter (exclude Autodesk system files like tbsys.sqlite).
+    - Level 3: Magic header check (verify 'SQLite format 3\\x00' 16-byte signature).
+    - Level 4: Master table check (verify existence of system table 'TB_DICTIONARY').
+
+    Uses an mtime cache to avoid repeated file read operations during polling.
+
+    Args:
+        file_path (str): File path to evaluate.
+
+    Returns:
+        bool: True if the file is a valid Autodesk Industry Model SQLite database.
     """
     try:
         if not os.path.isfile(file_path):
@@ -221,19 +255,19 @@ def is_autodesk_sqlite(file_path: str) -> bool:
             if cached_mtime == mtime:
                 return cached_val
 
-        # Level 1: exclusion by extension
+        # Level 1: Extension filter
         ext = Path(file_path).suffix.lower()
         if ext in _NON_SQLITE_EXTS:
             _ANALYZED_SQLITES[file_path] = (mtime, False)
             return False
 
-        # Level 2: exclusion of Autodesk system files
+        # Level 2: System filename exclusion
         fname = Path(file_path).name.lower()
         if "tbsys" in fname or "system" in fname:
             _ANALYZED_SQLITES[file_path] = (mtime, False)
             return False
 
-        # Level 3: reading the 16-byte SQLite magic header
+        # Level 3: SQLite 16-byte magic header verification
         try:
             with open(file_path, "rb") as f:
                 header = f.read(16)
@@ -245,7 +279,7 @@ def is_autodesk_sqlite(file_path: str) -> bool:
 
         logger.debug("Examining candidate SQLite file: %s", file_path)
 
-        # Level 4: check for TB_DICTIONARY table (unique to Autodesk Data Models)
+        # Level 4: Table existence check (TB_DICTIONARY)
         conn = sqlite3.connect(file_path, timeout=2.0)
         cursor = conn.cursor()
         cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='TB_DICTIONARY';")
@@ -266,8 +300,10 @@ def is_autodesk_sqlite(file_path: str) -> bool:
 
 def find_autodesk_sqlite(search_dir: str = None, model_name: str = None) -> str:
     """
-    Performs a general and dynamic search for an Autodesk SQLite file.
-    Returns the path of the most recently modified valid file.
+    Searches a directory recursively for the single most recently modified Autodesk SQLite file.
+
+    Returns:
+        str or None: Path of the target file, or None if no valid model found.
     """
     base_dir = search_dir if search_dir else tempfile.gettempdir()
     logger.info("General search in: %s", base_dir)
@@ -291,7 +327,16 @@ def find_autodesk_sqlite(search_dir: str = None, model_name: str = None) -> str:
 
 def clean_postgres_db_name(name: str) -> str:
     """
-    Cleans and formats a string to be a valid PostgreSQL database name.
+    Normalizes arbitrary strings into valid, safe PostgreSQL database identifiers:
+    - Removes accents/diacritics (e.g. 'é' -> 'e').
+    - Converts uppercase letters to lowercase.
+    - Replaces non-alphanumeric characters with underscores.
+
+    Args:
+        name (str): Original string (e.g. "Industry model (test)").
+
+    Returns:
+        str: Clean PostgreSQL database name (e.g. "industry_model_test").
     """
     if not name:
         return ""
@@ -308,7 +353,11 @@ def clean_postgres_db_name(name: str) -> str:
 
 def get_industry_model_name(sqlite_path: str) -> str:
     """
-    Reads the Industry Model name from the Autodesk system table 'TB_INFO'.
+    Queries `TB_INFO` system table in SQLite to extract the human-readable
+    document name (`DOCUMENT_NAME`) defined in Autodesk Infrastructure Administrator.
+
+    Returns:
+        str or None: Human-readable model title.
     """
     try:
         if not os.path.isfile(sqlite_path):
@@ -331,10 +380,10 @@ def get_industry_model_name(sqlite_path: str) -> str:
 
 
 # =============================================================================
-# 3. SCHEMA DIFF REPORT (V2 - Axis 2)
+# 3. SCHEMA DIFFERENCE & PHYSICAL DELETION ENGINE
 # =============================================================================
 
-# System tables managed by Autodesk/PostGIS that must never be auto-dropped
+# System tables managed by PostGIS/PostgreSQL that must NEVER be automatically dropped
 _PG_SYSTEM_TABLES = {
     "spatial_ref_sys", "geometry_columns", "geography_columns",
     "raster_columns", "raster_overviews",
@@ -343,17 +392,29 @@ _PG_SYSTEM_TABLES = {
 
 def detect_schema_differences(sqlite_path: str, pg_conn) -> dict:
     """
-    Compares PostgreSQL schema with the Autodesk SQLite Data Model and
-    automatically applies all deletions:
+    Compares the current PostgreSQL database schema with the source Autodesk Data Model.
+    Executes automatic physical deletions in PostgreSQL:
 
-    - Columns present in PostgreSQL but removed from the Data Model
-      → ALTER TABLE ... DROP COLUMN
-    - Tables present in PostgreSQL but removed from the Data Model
-      → DROP TABLE ... CASCADE
+    1. Table-level deletion:
+       If a table exists in PostgreSQL but is absent from the Autodesk Data Model
+       -> Executes `DROP TABLE "table" CASCADE`.
 
-    Deletions are always physical: if the administrator removed something
-    in Autodesk Infrastructure Administrator (with confirmation), it must
-    be reflected immediately in PostgreSQL.
+    2. Column-level deletion:
+       If a column exists in PostgreSQL but has been removed from the Autodesk Data Model
+       -> Executes `ALTER TABLE "table" DROP COLUMN IF EXISTS "column"`.
+
+    3. System table protection:
+       Guarantees PostGIS system tables (`spatial_ref_sys`, `geometry_columns`, etc.) are preserved.
+
+    4. Audit logging:
+       Generates a timestamped JSON schema diff report (`schema_diff_YYYYMMDD_HHMMSS.json`).
+
+    Args:
+        sqlite_path (str): Path to source Autodesk SQLite file.
+        pg_conn: Active PostgreSQL psycopg2 connection.
+
+    Returns:
+        dict: Summary report of missing columns, orphan columns, dropped tables, and type mismatches.
     """
     report = {}
 
@@ -378,22 +439,26 @@ def detect_schema_differences(sqlite_path: str, pg_conn) -> dict:
         pg_cursor = pg_conn.cursor()
 
         # ── Table-level deletion detection ─────────────────────────────────────
-        # Build the set of table names that still exist in the Data Model
         sqlite_table_names = {info["name"].upper() for info in classes.values()}
 
-        # Get all user tables currently in the PostgreSQL public schema
+        # Fetch physical tables from SQLite master to include domain tables (*_TBD, TB_DOMAIN, etc.)
+        sq_cursor.execute("SELECT name FROM sqlite_master WHERE type='table';")
+        sqlite_physical_tables = {row[0].upper() for row in sq_cursor.fetchall()}
+        valid_autodesk_tables = sqlite_table_names.union(sqlite_physical_tables)
+
+        # Fetch all user tables in public schema
         pg_cursor.execute(
             "SELECT table_name FROM information_schema.tables "
             "WHERE table_schema = 'public' AND table_type = 'BASE TABLE';"
         )
         pg_all_tables = {row[0] for row in pg_cursor.fetchall()}
 
-        # Tables in PG that are no longer in the Data Model
+        # Drop orphan tables missing in Data Model
         dropped_tables = []
         for pg_tbl in pg_all_tables:
             if pg_tbl.lower() in _PG_SYSTEM_TABLES:
                 continue
-            if pg_tbl.upper() not in sqlite_table_names:
+            if pg_tbl.upper() not in valid_autodesk_tables:
                 try:
                     pg_cursor.execute(f'DROP TABLE IF EXISTS "{pg_tbl}" CASCADE;')
                     pg_conn.commit()
@@ -411,7 +476,7 @@ def detect_schema_differences(sqlite_path: str, pg_conn) -> dict:
         for class_id, class_info in classes.items():
             tbl_name = class_info["name"]
 
-            # Verify table exists in PG (it may have just been dropped above)
+            # Confirm table still exists in PostgreSQL
             pg_cursor.execute(
                 "SELECT EXISTS (SELECT 1 FROM information_schema.tables "
                 "WHERE table_schema = 'public' AND table_name = %s);",
@@ -420,11 +485,9 @@ def detect_schema_differences(sqlite_path: str, pg_conn) -> dict:
             if not pg_cursor.fetchone()[0]:
                 continue
 
-            # Get SQLite columns
             phys_cols = get_physical_column_info(sq_conn, tbl_name)
             sqlite_col_names = set(phys_cols.keys())
 
-            # Get PostgreSQL columns with types
             pg_cursor.execute(
                 "SELECT column_name, data_type FROM information_schema.columns "
                 "WHERE table_schema = 'public' AND table_name = %s;",
@@ -436,17 +499,14 @@ def detect_schema_differences(sqlite_path: str, pg_conn) -> dict:
             missing_in_pg = sorted(sqlite_col_names - pg_col_names)
             orphan_in_pg  = sorted(pg_col_names - sqlite_col_names)
 
-            # Type comparison for common columns
+            # Detect data type mismatches
             type_mismatch = {}
             for col_upper in sorted(sqlite_col_names & pg_col_names):
                 sqlite_type = phys_cols[col_upper]["raw_type"].upper() if phys_cols[col_upper]["raw_type"] else ""
                 pg_type = pg_cols_info[col_upper].upper()
                 fmeta = fdo_meta.get((tbl_name.upper(), col_upper), {})
                 fdo_dtype = fmeta.get("data_type")
-                if fdo_dtype in FDO_TO_POSTGRES_TYPES:
-                    expected_pg = FDO_TO_POSTGRES_TYPES[fdo_dtype].upper()
-                else:
-                    expected_pg = None
+                expected_pg = FDO_TO_POSTGRES_TYPES.get(fdo_dtype, "").upper() if fdo_dtype in FDO_TO_POSTGRES_TYPES else None
                 if expected_pg and expected_pg not in pg_type and pg_type not in expected_pg:
                     type_mismatch[col_upper] = {
                         "sqlite": sqlite_type,
@@ -461,7 +521,7 @@ def detect_schema_differences(sqlite_path: str, pg_conn) -> dict:
                     "type_mismatch": type_mismatch
                 }
 
-                # Always drop orphan columns — deletion in the Data Model is physical
+                # Physical deletion of orphan columns
                 for col in orphan_in_pg:
                     try:
                         pg_cursor.execute(f'ALTER TABLE "{tbl_name}" DROP COLUMN IF EXISTS "{col}";')
@@ -485,7 +545,7 @@ def detect_schema_differences(sqlite_path: str, pg_conn) -> dict:
     except Exception as e:
         logger.error("Error during schema difference detection: %s", e, exc_info=True)
 
-    # Save report to JSON only when there are actual differences
+    # Save JSON report if discrepancies were found
     if report:
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         report_file = f"schema_diff_{timestamp}.json"
@@ -500,15 +560,19 @@ def detect_schema_differences(sqlite_path: str, pg_conn) -> dict:
 
 
 # =============================================================================
-# 4. DATA SYNCHRONIZATION (V2 - Axis 3)
+# 4. INCREMENTAL DATA SYNCHRONIZATION (UPSERT ENGINE)
 # =============================================================================
 
 def sync_data(sqlite_path: str, pg_conn, default_srid: int = 2154):
     """
-    Synchronizes data from SQLite to PostgreSQL using upsert (INSERT ... ON CONFLICT DO UPDATE).
-    Handles geometry conversion from SQLite BLOB (WKB) to PostGIS format.
+    Synchronizes records from SQLite to PostgreSQL using upsert (`INSERT ... ON CONFLICT DO UPDATE`).
+    Converts SQLite WKB binary spatial data into PostGIS geometries (`ST_GeomFromWKB`).
+
+    Args:
+        sqlite_path (str): Source SQLite file path.
+        pg_conn: PostgreSQL connection.
+        default_srid (int): Target PostGIS EPSG code.
     """
-    # Optional tqdm progress bar
     try:
         from tqdm import tqdm
         has_tqdm = True
@@ -542,11 +606,10 @@ def sync_data(sqlite_path: str, pg_conn, default_srid: int = 2154):
         for class_id, class_info in table_iter:
             tbl_name = class_info["name"]
 
-            # Skip domain tables
+            # Skip domain tables (handled during DDL creation)
             if tbl_name.upper().endswith("_TBD"):
                 continue
 
-            # Check if table exists in PostgreSQL
             pg_cursor.execute(
                 "SELECT EXISTS (SELECT FROM information_schema.tables WHERE table_schema = 'public' AND table_name = %s);",
                 (tbl_name,)
@@ -554,20 +617,16 @@ def sync_data(sqlite_path: str, pg_conn, default_srid: int = 2154):
             if not pg_cursor.fetchone()[0]:
                 continue
 
-            # Get column info
             phys_cols = get_physical_column_info(sq_conn, tbl_name)
             if not phys_cols:
                 continue
 
-            # Get PK column
             pk_col = get_pk_column_name(sq_conn, tbl_name)
             tbl_spatial = spatial_meta.get(tbl_name.upper(), {})
             geom_col = tbl_spatial.get("geom_col", "GEOM").upper()
             srid = tbl_spatial.get("srid", default_srid)
 
-            # Read all rows from SQLite
             try:
-                col_names = [info["name"] for info in phys_cols.values()]
                 sq_cursor.execute(f'SELECT * FROM "{tbl_name}";')
                 rows = sq_cursor.fetchall()
             except Exception as e:
@@ -595,8 +654,8 @@ def sync_data(sqlite_path: str, pg_conn, default_srid: int = 2154):
                         col_name = pinfo["name"]
                         val = row[i] if i < len(row) else None
 
+                        # Spatial geometry handling
                         if col_upper == geom_col and val is not None:
-                            # Geometry column: handle WKB blob or WKT string
                             if isinstance(val, bytes):
                                 col_placeholders.append(f"ST_GeomFromWKB(%s::bytea, {srid})")
                                 values.append(val)
@@ -610,6 +669,7 @@ def sync_data(sqlite_path: str, pg_conn, default_srid: int = 2154):
                             col_placeholders.append("%s")
                             values.append(val)
 
+                        # Exclude PK column from UPDATE clause
                         if col_upper != pk_col.upper():
                             if col_upper == geom_col and val is not None:
                                 if isinstance(val, bytes):
@@ -656,14 +716,18 @@ def sync_data(sqlite_path: str, pg_conn, default_srid: int = 2154):
 
 
 # =============================================================================
-# 5. COLUMN SYNCHRONIZATION (V1 logic with V2 logging)
+# 5. DYNAMIC COLUMN SYNCHRONIZATION
 # =============================================================================
 
 def sync_table_columns(sqlite_path: str, pg_conn, default_srid=2154):
     """
-    Dynamically synchronizes table columns from SQLite to PostgreSQL.
-    For each column present in SQLite but absent in PostgreSQL,
-    issues an ALTER TABLE ADD COLUMN command with the correct type.
+    Applies `ALTER TABLE ADD COLUMN` for new attributes added to existing tables
+    in the Autodesk Data Model.
+
+    Args:
+        sqlite_path (str): SQLite database path.
+        pg_conn: PostgreSQL connection.
+        default_srid (int): Target PostGIS EPSG code.
     """
     try:
         sq_conn = sqlite3.connect(sqlite_path)
@@ -685,7 +749,6 @@ def sync_table_columns(sqlite_path: str, pg_conn, default_srid=2154):
         classes = get_autodesk_classes(sq_conn)
         fdo_meta = get_fdo_column_metadata(sq_conn)
         spatial_meta = get_spatial_metadata(sq_conn)
-
         pg_cursor = pg_conn.cursor()
 
         for class_id, class_info in classes.items():
@@ -696,8 +759,7 @@ def sync_table_columns(sqlite_path: str, pg_conn, default_srid=2154):
                 "SELECT EXISTS (SELECT FROM information_schema.tables WHERE table_schema = 'public' AND table_name = %s);",
                 (tbl_name,)
             )
-            table_exists = pg_cursor.fetchone()[0]
-            if not table_exists:
+            if not pg_cursor.fetchone()[0]:
                 continue
 
             phys_cols = get_physical_column_info(sq_conn, tbl_name)
@@ -759,12 +821,13 @@ def sync_table_columns(sqlite_path: str, pg_conn, default_srid=2154):
 
 
 # =============================================================================
-# 6. POSTGRESQL DATABASE MANAGEMENT
+# 6. POSTGRESQL DATABASE AUTOMATIC PROVISIONING
 # =============================================================================
 
 def ensure_pg_database_exists(host="localhost", port=5432, user="postgres", password="", dbname="autocad_test"):
     """
-    Checks if the PostgreSQL database exists, and creates it automatically if needed.
+    Verifies if target PostgreSQL database exists. Automatically creates the database
+    and enables the PostGIS extension (`CREATE EXTENSION IF NOT EXISTS postgis`) if missing.
     """
     try:
         import psycopg2
@@ -796,41 +859,37 @@ def ensure_pg_database_exists(host="localhost", port=5432, user="postgres", pass
         logger.error("Error while checking/creating PostgreSQL database: %s", e, exc_info=True)
 
 
-# =============================================================================
-# 7. CONVERSION & APPLICATION ENGINE
-# =============================================================================
-
-# =============================================================================
-# 6.5 HELPER FUNCTIONS FOR POSTGRESQL INSPECTION
-# =============================================================================
-
+# Helper inspection queries
 def get_existing_tables(cursor) -> set:
-    """Returns a set of uppercase table names in the public schema."""
+    """Returns set of uppercase table names in public schema."""
     cursor.execute("SELECT table_name FROM information_schema.tables WHERE table_schema = 'public';")
     return {row[0].upper() for row in cursor.fetchall()}
 
-
 def get_existing_indexes(cursor) -> set:
-    """Returns a set of uppercase index names in the public schema."""
+    """Returns set of uppercase index names in public schema."""
     cursor.execute("SELECT indexname FROM pg_indexes WHERE schemaname = 'public';")
     return {row[0].upper() for row in cursor.fetchall()}
 
-
 def get_existing_triggers(cursor) -> set:
-    """Returns a set of uppercase trigger names in the public schema."""
+    """Returns set of uppercase trigger names in public schema."""
     cursor.execute("SELECT trigger_name FROM information_schema.triggers WHERE trigger_schema = 'public';")
     return {row[0].upper() for row in cursor.fetchall()}
 
 
 # =============================================================================
-# 7. CONVERSION & APPLICATION ENGINE
+# 7. CONVERSION EXECUTION & PostgreSQL APPLICATION ENGINE
 # =============================================================================
 
 def run_conversion_and_apply(sqlite_path: str, output_sql: str, pg_host: str, pg_port: int,
                              pg_user: str, pg_pass: str, pg_db: str, srid: int,
                              sync_data_flag: bool = False):
     """
-    Executes the DDL conversion script on a SQLite file and applies the generated DDL to PostgreSQL.
+    Main orchestration step:
+    1. Invokes `convert_autodesk_to_postgis.py` via subprocess to build DDL SQL.
+    2. Connects to PostgreSQL via psycopg2 and executes DDL statements safely.
+    3. Runs dynamic column synchronization (`sync_table_columns`).
+    4. Runs physical deletion detection (`detect_schema_differences`).
+    5. Optionally syncs records (`sync_data`).
     """
     cmd = [
         sys.executable,
@@ -921,15 +980,15 @@ def run_conversion_and_apply(sqlite_path: str, output_sql: str, pg_host: str, pg
                         failed_statements.append((first_line, str(ex)))
                         logger.error("SQL Error: %s -> %s", first_line, ex)
 
-                # Column synchronization (ALTER TABLE)
+                # Column addition sync
                 logger.info("Starting attribute synchronization...")
                 sync_table_columns(sqlite_path, conn, srid)
 
-                # Detect and apply schema differences (deleted columns + deleted tables)
+                # Deletion sync (dropped tables & dropped columns)
                 logger.info("Detecting schema differences and applying deletions...")
                 detect_schema_differences(sqlite_path, conn)
 
-                # V2: Data synchronization (optional)
+                # Data record sync (upsert)
                 if sync_data_flag:
                     logger.info("Starting data synchronization (upsert)...")
                     sync_data(sqlite_path, conn, srid)
@@ -937,7 +996,7 @@ def run_conversion_and_apply(sqlite_path: str, output_sql: str, pg_host: str, pg
                 cursor.close()
                 conn.close()
 
-                # Summary
+                # Execution Summary
                 logger.info("=== SYNCHRONIZATION SUMMARY ===")
                 logger.info("Feature Classes: %d table(s) %s", len(created_tables),
                             f"-> {', '.join(created_tables)}" if created_tables else "")
@@ -961,12 +1020,22 @@ def run_conversion_and_apply(sqlite_path: str, output_sql: str, pg_host: str, pg
 
 
 # =============================================================================
-# 8. MULTI-MODEL FILE DISCOVERY
+# 8. MULTI-MODEL DISCOVERY & DE-DUPLICATION ENGINE
 # =============================================================================
 
 def find_all_autodesk_sqlites(search_dir: str = None, model_name: str = None) -> list:
     """
-    Scans the temporary directory (%TEMP% by default) and returns ALL valid Autodesk SQLite files.
+    Scans search directory (default `%TEMP%`) and discovers all valid Autodesk SQLite files.
+    Calculates stable PostgreSQL database target names derived from filename stem or parent folder name.
+
+    Returns:
+        list of dict: Model definitions -> [{
+            "path": str,
+            "model_name": str,
+            "db_name": str,
+            "output_sql": str,
+            "mtime": float
+        }]
     """
     base_dir = search_dir if search_dir else tempfile.gettempdir()
     found_models = []
@@ -982,16 +1051,11 @@ def find_all_autodesk_sqlites(search_dir: str = None, model_name: str = None) ->
             if full_path in seen_paths:
                 continue
 
-
             if is_autodesk_sqlite(full_path):
                 seen_paths.add(full_path)
 
                 file_stem = Path(full_path).stem
-
-                # Use the filesystem name (file stem / parent folder) as the stable database identifier.
-                # TB_INFO DOCUMENT_NAME is kept as a human-readable label but NOT used for db naming,
-                # because Autodesk can write the same DOCUMENT_NAME into multiple temp files.
-                doc_name = get_industry_model_name(full_path)  # human-readable label only
+                doc_name = get_industry_model_name(full_path)
 
                 if not file_stem.lower().startswith("drawing") and file_stem.lower() != "datamodel":
                     raw_name = file_stem
@@ -1003,7 +1067,7 @@ def find_all_autodesk_sqlites(search_dir: str = None, model_name: str = None) ->
                 if not db_name:
                     db_name = "industry_model"
 
-                # Strict deduplication by exact file path — no suffix appending
+                # Deduplicate by database name (keep newest file if multiple files resolve to same db_name)
                 if db_name in used_db_names:
                     existing_index = used_db_names[db_name]
                     if found_models[existing_index]["mtime"] < os.path.getmtime(full_path):
@@ -1028,13 +1092,11 @@ def find_all_autodesk_sqlites(search_dir: str = None, model_name: str = None) ->
                     "mtime": mtime
                 })
 
-
-
     return found_models
 
 
 # =============================================================================
-# 9. WATCHDOG HANDLER (V2 - Axis 6)
+# 9. WATCHDOG REAL-TIME EVENT HANDLER
 # =============================================================================
 
 try:
@@ -1046,10 +1108,7 @@ except ImportError:
 
 
 class AutodeskSQLiteHandler:
-    """
-    Watchdog-based file system event handler for Autodesk SQLite files.
-    Includes debounce mechanism to avoid duplicate triggers.
-    """
+    """Wrapper around Watchdog FileSystemEventHandler."""
 
     def __init__(self, pg_host, pg_port, pg_user, pg_pass, pg_db, srid, output_sql, sync_data_flag, model_name=None):
         if HAS_WATCHDOG:
@@ -1067,12 +1126,13 @@ class AutodeskSQLiteHandler:
         self.model_name = model_name
 
 
-class _WatchdogHandler(FileSystemEventHandler):
-        """Internal watchdog handler with debounce logic."""
+if HAS_WATCHDOG:
+    class _WatchdogHandler(FileSystemEventHandler):
+        """Internal watchdog handler with 3.0s debounce mechanism to filter burst write events."""
 
         DEBOUNCE_SECONDS = 3.0
 
-        def __init__(self, pg_host, pg_port, pg_user, pg_pass, pg_db, srid, output_sql, sync_data_flag, allow_drop, model_name):
+        def __init__(self, pg_host, pg_port, pg_user, pg_pass, pg_db, srid, output_sql, sync_data_flag, model_name):
             super().__init__()
             self.pg_host = pg_host
             self.pg_port = pg_port
@@ -1082,13 +1142,10 @@ class _WatchdogHandler(FileSystemEventHandler):
             self.srid = srid
             self.output_sql = output_sql
             self.sync_data_flag = sync_data_flag
-            self.allow_drop = allow_drop
             self.model_name = model_name
-            self._last_triggered = {}  # file_path -> timestamp
-            self._monitored = {}  # file_path -> {db_name, output_sql}
+            self._last_triggered = {}
 
         def _should_process(self, file_path: str) -> bool:
-            """Debounce: skip if triggered too recently."""
             now = time.time()
             last = self._last_triggered.get(file_path, 0)
             if now - last < self.DEBOUNCE_SECONDS:
@@ -1116,11 +1173,6 @@ class _WatchdogHandler(FileSystemEventHandler):
             db_name = self.pg_db
             out_sql = self.output_sql
             if not db_name:
-                # Use the filesystem stem as source of truth — same logic as find_all_autodesk_sqlites
-                # so that watchdog events always resolve to the same DB as the startup scan.
-                # TB_INFO.DOCUMENT_NAME is intentionally NOT used here because it contains
-                # the internal Autodesk project name (e.g. "Industry model 1") which may differ
-                # from the actual filename (e.g. "Industry model initial").
                 file_stem = Path(file_path).stem
                 if not file_stem.lower().startswith("drawing") and file_stem.lower() != "datamodel":
                     raw_name = file_stem
@@ -1151,7 +1203,7 @@ class _WatchdogHandler(FileSystemEventHandler):
 
 
 # =============================================================================
-# 10. MAIN MONITORING SERVICE
+# 10. MAIN MONITORING SERVICE LOOP
 # =============================================================================
 
 def watch_file(sqlite_path: str = None, search_dir: str = None, model_name: str = None,
@@ -1159,8 +1211,7 @@ def watch_file(sqlite_path: str = None, search_dir: str = None, model_name: str 
                pg_pass=None, pg_db=None, srid: int = 2154, run_initial_sync: bool = False,
                sync_data_flag: bool = False):
     """
-    Multi-model monitoring service:
-    Uses watchdog (if available) or polling fallback.
+    Starts the continuous multi-model monitoring service using Watchdog or Polling mode.
     """
     logger.info("===================================================================")
     logger.info(" AUTODESK MULTI-MODEL AUTOMATIC MONITORING SERVICE")
@@ -1173,7 +1224,7 @@ def watch_file(sqlite_path: str = None, search_dir: str = None, model_name: str 
     else:
         logger.info("Mode: DDL file generation only")
 
-    # Initial detection
+    # Initial scan of available Industry Models
     if sqlite_path and os.path.exists(sqlite_path):
         raw_name = Path(sqlite_path).stem
         target_db = pg_db or clean_postgres_db_name(raw_name)
@@ -1220,7 +1271,7 @@ def watch_file(sqlite_path: str = None, search_dir: str = None, model_name: str 
                 sync_data_flag=sync_data_flag,
             )
 
-    # V2: Choose watchdog or polling
+    # Launch monitoring backend
     if HAS_WATCHDOG:
         logger.info("Watchdog mode active (event-driven monitoring). Press CTRL+C to stop.")
         _watch_with_watchdog(
@@ -1242,11 +1293,11 @@ def watch_file(sqlite_path: str = None, search_dir: str = None, model_name: str 
 
 def _watch_with_watchdog(watch_dir, pg_host, pg_port, pg_user, pg_pass, pg_db, srid,
                           output_sql, sync_data_flag, model_name):
-    """Run monitoring using watchdog Observer."""
+    """Event-driven watchdog observer runner."""
     handler = _WatchdogHandler(
         pg_host=pg_host, pg_port=pg_port, pg_user=pg_user, pg_pass=pg_pass,
         pg_db=pg_db, srid=srid, output_sql=output_sql,
-        sync_data_flag=sync_data_flag, allow_drop=False, model_name=model_name
+        sync_data_flag=sync_data_flag, model_name=model_name
     )
     observer = Observer()
     observer.schedule(handler, watch_dir, recursive=True)
@@ -1264,7 +1315,7 @@ def _watch_with_watchdog(watch_dir, pg_host, pg_port, pg_user, pg_pass, pg_db, s
 def _watch_with_polling(sqlite_path, search_dir, model_name, output_sql,
                          pg_host, pg_port, pg_user, pg_pass, pg_db, srid,
                          monitored, sync_data_flag):
-    """Run monitoring using polling fallback."""
+    """Timer-driven polling observer fallback runner."""
     logger.info("Polling mode active (every %ds). Press CTRL+C to stop.", CHECK_INTERVAL_SECONDS)
 
     try:
@@ -1355,12 +1406,11 @@ if __name__ == "__main__":
     parser.add_argument("--srid", type=int, default=2154, help="EPSG / SRID spatial code for PostGIS (default: 2154)")
     parser.add_argument("--initial-sync", action="store_true", help="Execute an immediate synchronization at startup.")
 
-    # V2 options
+    # Data sync & logging options
     parser.add_argument("--sync-data", dest="sync_data", action="store_true", default=True,
                         help="Enable data synchronization (upsert) in addition to schema sync (default: True).")
     parser.add_argument("--no-sync-data", dest="sync_data", action="store_false",
                         help="Disable data synchronization (only sync schema).")
-    # Deletion of removed Data Model elements is always physical (no flag needed)
     parser.add_argument("--log-file", dest="log_file", default="connector_sync.log",
                         help="Path to log file (default: connector_sync.log)")
     parser.add_argument("-v", "--verbose", action="store_true", help="Enable verbose/debug logging")
