@@ -1,3 +1,4 @@
+# AutoCAD Map 3D - PostgreSQL Connector Dependencies
 pytest>=7.0.0
 watchdog>=2.0.0
 tqdm>=4.60.0
