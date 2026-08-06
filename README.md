@@ -80,29 +80,37 @@ Infrastructure Administrator ──► Data Model (SQLite export)
 
 ```
 .
-├── Phase 1/
+├── Phase 1-FDO-Provider-Analysis/
 │   ├── 01-autodesk-architecture.md      # Phase 1 — Observed Autodesk architecture (FR)
 │   └── 01-autodesk-architecture_EN.md   # Phase 1 — Observed Autodesk architecture (EN)
-├── Phase 2/
+├── Phase 2-PostGIS-Direct-Connection/
 │   ├── 02-postgis-postgresql.md         # Phase 2 — PostgreSQL/PostGIS and FDO connector (FR)
 │   └── 02-postgis-postgresql_EN.md      # Phase 2 — PostgreSQL/PostGIS and FDO connector (EN)
-├── Phase 3-Reverse-Engineering/
+├── Phase 3-SQLite-Reverse-Engineering/
 │   ├── 03-data-model-analyse.md         # Phase 3 — Data Model analysis & reverse engineering (FR)
 │   ├── 03-data-model-analyse_EN.md      # Phase 3 — Data Model analysis & reverse engineering (EN)
 │   ├── compare_sqlite.py                # Automated comparison script for SQLite exports
 │   ├── rapport_test1_vs_test2.md        # Example comparison report
 │   ├── Test0/ ... Test18/               # Differential test campaign (schema + SQL dump per test)
 │   └── PFA-Phase 3.xlsx                 # Synthesis spreadsheet
-├── Phase 4/
+├── Phase 4-TKI-PGP-Role-Analysis/
 │   ├── 04-role-tki-pgp.md               # Phase 4 — Role of TKI PGP in Autodesk architecture (FR)
 │   └── 04-role-tki-pgp_EN.md            # Phase 4 — Role of TKI PGP in Autodesk architecture (EN)
-├── Phase 5/
+├── Phase 5-Target-Architecture/
 │   ├── 05-architecture-cible.md         # Phase 5 — Target architecture & alternative solution (FR)
-│   ├── 05-architecture-cible_EN.md      # Phase 5 — Target architecture & alternative solution (EN)
-│   ├── convert_autodesk_to_postgis.py   # Automated SQLite to PostgreSQL DDL converter
-│   └── watch_and_sync.py                # Automated watcher and sync script
-├── README.md                            # Main README (French)
-└── README_EN.md                         # Main README (English)
+│   └── 05-architecture-cible_EN.md      # Phase 5 — Target architecture & alternative solution (EN)
+├── Phase 6-Implementation-Testing/
+│   ├── scripts/
+│   │   ├── convert_autodesk_to_postgis.py   # Automated SQLite to PostgreSQL DDL converter
+│   │   └── watch_and_sync.py                # Live watcher and auto-sync service
+│   ├── tests/
+│   │   ├── conftest.py                      # Pytest fixtures and shared configuration
+│   │   ├── test_converter.py                # Unit tests for the DDL converter
+│   │   ├── test_inheritance.py              # Unit tests for table inheritance logic
+│   │   └── test_watcher.py                  # Unit tests for the watcher service
+│   └── requirements-dev.txt                 # Development and testing dependencies
+├── README_FR.md                         # Main README (French)
+└── README.md                            # Main README (English)
 ```
 
 ## Technologies Used

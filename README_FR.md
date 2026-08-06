@@ -80,29 +80,37 @@ Infrastructure Administrator ──► Data Model (export SQLite)
 
 ```
 .
-├── Phase 1/
+├── Phase 1-FDO-Provider-Analysis/
 │   ├── 01-autodesk-architecture.md      # Phase 1 — architecture Autodesk observée (FR)
 │   └── 01-autodesk-architecture_EN.md   # Phase 1 — architecture Autodesk observée (EN)
-├── Phase 2/
+├── Phase 2-PostGIS-Direct-Connection/
 │   ├── 02-postgis-postgresql.md         # Phase 2 — PostgreSQL/PostGIS et connecteur FDO (FR)
 │   └── 02-postgis-postgresql_EN.md      # Phase 2 — PostgreSQL/PostGIS et connecteur FDO (EN)
-├── Phase 3-Reverse-Engineering/
+├── Phase 3-SQLite-Reverse-Engineering/
 │   ├── 03-data-model-analyse.md         # Phase 3 — Analyse et reverse engineering (FR)
 │   ├── 03-data-model-analyse_EN.md      # Phase 3 — Analyse et reverse engineering (EN)
 │   ├── compare_sqlite.py                # Script de comparaison automatisée de deux exports SQLite
 │   ├── rapport_test1_vs_test2.md        # Exemple de rapport de comparaison
 │   ├── Test0/ ... Test18/               # Campagne de tests différentiels (schéma + dump SQL par test)
 │   └── PFA-Phase 3.xlsx                 # Support de travail / document de synthèse
-├── Phase 4/
+├── Phase 4-TKI-PGP-Role-Analysis/
 │   ├── 04-role-tki-pgp.md               # Phase 4 — Rôle de TKI PGP dans l'architecture Autodesk (FR)
 │   └── 04-role-tki-pgp_EN.md            # Phase 4 — Rôle de TKI PGP dans l'architecture Autodesk (EN)
-├── Phase 5/
+├── Phase 5-Target-Architecture/
 │   ├── 05-architecture-cible.md         # Phase 5 — Architecture cible & solution alternative (FR)
-│   ├── 05-architecture-cible_EN.md      # Phase 5 — Architecture cible & solution alternative (EN)
-│   ├── convert_autodesk_to_postgis.py   # Convertisseur automatisé SQLite vers DDL PostgreSQL
-│   └── watch_and_sync.py                # Script de surveillance et synchronisation automatique
-├── README.md                            # README principal (Français)
-└── README_EN.md                         # README principal (Anglais)
+│   └── 05-architecture-cible_EN.md      # Phase 5 — Architecture cible & solution alternative (EN)
+├── Phase 6-Implementation-Testing/
+│   ├── scripts/
+│   │   ├── convert_autodesk_to_postgis.py   # Convertisseur automatisé SQLite vers DDL PostgreSQL
+│   │   └── watch_and_sync.py                # Service de surveillance et synchronisation en temps réel
+│   ├── tests/
+│   │   ├── conftest.py                      # Fixtures Pytest et configuration partagée
+│   │   ├── test_converter.py                # Tests unitaires du convertisseur DDL
+│   │   ├── test_inheritance.py              # Tests unitaires pour l'héritage de tables
+│   │   └── test_watcher.py                  # Tests unitaires du service de surveillance
+│   └── requirements-dev.txt                 # Dépendances de développement et de test
+├── README_FR.md                         # README principal (Français)
+└── README.md                            # README principal (Anglais)
 ```
 
 ## Technologies utilisées
