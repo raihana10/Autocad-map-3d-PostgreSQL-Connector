@@ -1074,11 +1074,18 @@ class _WatchdogHandler(FileSystemEventHandler):
             db_name = self.pg_db
             out_sql = self.output_sql
             if not db_name:
-                model_name_from_file = get_industry_model_name(file_path)
-                if model_name_from_file:
-                    db_name = clean_postgres_db_name(model_name_from_file)
-                if not db_name:
-                    db_name = clean_postgres_db_name(Path(file_path).stem)
+                # Use the filesystem stem as source of truth — same logic as find_all_autodesk_sqlites
+                # so that watchdog events always resolve to the same DB as the startup scan.
+                # TB_INFO.DOCUMENT_NAME is intentionally NOT used here because it contains
+                # the internal Autodesk project name (e.g. "Industry model 1") which may differ
+                # from the actual filename (e.g. "Industry model initial").
+                file_stem = Path(file_path).stem
+                if not file_stem.lower().startswith("drawing") and file_stem.lower() != "datamodel":
+                    raw_name = file_stem
+                else:
+                    parent_name = Path(file_path).parent.name
+                    raw_name = f"{file_stem}_{parent_name[:6]}"
+                db_name = clean_postgres_db_name(raw_name) or "industry_model"
             if not out_sql:
                 out_sql = f"schema_{db_name}.sql"
 
