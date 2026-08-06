@@ -334,19 +334,11 @@ def get_industry_model_name(sqlite_path: str) -> str:
 # 3. SCHEMA DIFF REPORT (V2 - Axis 2)
 # =============================================================================
 
-def detect_schema_differences(sqlite_path: str, pg_conn) -> dict:
+def detect_schema_differences(sqlite_path: str, pg_conn, allow_drop: bool = False) -> dict:
     """
     Compares the columns of PostgreSQL with those of the SQLite source
     for each business table. Generates a structured diff report.
-
-    Returns a dict:
-    {
-      "table_name": {
-        "missing_in_pg": ["col1", "col2"],
-        "orphan_in_pg": ["col3", "col4"],
-        "type_mismatch": {"col5": {"sqlite": "INT", "pg": "VARCHAR"}}
-      }
-    }
+    If allow_drop=True, automatically issues ALTER TABLE DROP COLUMN for orphan columns.
     """
     report = {}
 
@@ -373,9 +365,9 @@ def detect_schema_differences(sqlite_path: str, pg_conn) -> dict:
         for class_id, class_info in classes.items():
             tbl_name = class_info["name"]
 
-            # Check if table exists in PostgreSQL
+            # Verify table exists in PG
             pg_cursor.execute(
-                "SELECT EXISTS (SELECT FROM information_schema.tables WHERE table_schema = 'public' AND table_name = %s);",
+                "SELECT EXISTS (SELECT 1 FROM information_schema.tables WHERE table_schema = 'public' AND table_name = %s);",
                 (tbl_name,)
             )
             if not pg_cursor.fetchone()[0]:
@@ -425,10 +417,21 @@ def detect_schema_differences(sqlite_path: str, pg_conn) -> dict:
                 }
 
                 if orphan_in_pg:
-                    logger.warning(
-                        "Table '%s': %d orphan column(s) in PostgreSQL (not in SQLite source): %s",
-                        tbl_name, len(orphan_in_pg), orphan_in_pg
-                    )
+                    if allow_drop:
+                        for col in orphan_in_pg:
+                            try:
+                                drop_sql = f'ALTER TABLE "{tbl_name}" DROP COLUMN "{col}";'
+                                pg_cursor.execute(drop_sql)
+                                pg_conn.commit()
+                                logger.info("ALTER TABLE DROP COLUMN: Removed orphan column '%s' from PG table '%s'", col, tbl_name)
+                            except Exception as e:
+                                pg_conn.rollback()
+                                logger.error("Failed to drop orphan column '%s' from '%s': %s", col, tbl_name, e)
+                    else:
+                        logger.warning(
+                            "Table '%s': %d orphan column(s) in PostgreSQL (not in SQLite source): %s",
+                            tbl_name, len(orphan_in_pg), orphan_in_pg
+                        )
                 if missing_in_pg:
                     logger.info(
                         "Table '%s': %d column(s) missing in PostgreSQL: %s",
@@ -773,15 +776,15 @@ def run_conversion_and_apply(sqlite_path: str, output_sql: str, pg_host="localho
                 pg_db = cleaned_db
             else:
                 pg_db = clean_postgres_db_name(Path(sqlite_path).stem)
-        else:
-            pg_db = clean_postgres_db_name(Path(sqlite_path).stem)
-
-    script_dir = Path(__file__).parent
-    converter_script = script_dir / "convert_autodesk_to_postgis.py"
-
+def run_conversion_and_apply(sqlite_path: str, output_sql: str, pg_host: str, pg_port: int,
+                             pg_user: str, pg_pass: str, pg_db: str, srid: int,
+                             sync_data_flag: bool = False, allow_drop: bool = False):
+    """
+    Executes the DDL conversion script on a SQLite file and applies the generated DDL to PostgreSQL.
+    """
     cmd = [
         sys.executable,
-        str(converter_script),
+        os.path.join(os.path.dirname(__file__), "convert_autodesk_to_postgis.py"),
         "--db", sqlite_path,
         "--out", output_sql,
         "--srid", str(srid)
@@ -816,23 +819,23 @@ def run_conversion_and_apply(sqlite_path: str, output_sql: str, pg_host="localho
 
                 logger.info("Schema application starting...")
 
-                cursor.execute("SELECT table_name FROM information_schema.tables WHERE table_schema = 'public';")
-                existing_pg_tables = {row[0].upper() for row in cursor.fetchall()}
+                existing_pg_tables = get_existing_tables(cursor)
+                existing_pg_indexes = get_existing_indexes(cursor)
+                existing_pg_triggers = get_existing_triggers(cursor)
 
-                cursor.execute("SELECT indexname FROM pg_indexes WHERE schemaname = 'public';")
-                existing_pg_indexes = {row[0].upper() for row in cursor.fetchall()}
+                statements = split_sql_statements(sql_content)
 
-                cursor.execute("SELECT trigger_name FROM information_schema.triggers WHERE trigger_schema = 'public';")
-                existing_pg_triggers = {row[0].upper() for row in cursor.fetchall()}
+                for stmt in statements:
+                    stmt_clean = stmt.strip()
+                    if not stmt_clean or stmt_clean.startswith("--"):
+                        continue
 
-                for stmt_clean in split_sql_statements(sql_content):
                     stmt_upper = stmt_clean.upper()
                     try:
-                        cursor.execute(stmt_clean + ";")
-                        conn.commit()
+                        cursor.execute(stmt_clean)
                         success_count += 1
 
-                        if "CREATE TABLE IF NOT EXISTS" in stmt_upper or "CREATE TABLE" in stmt_upper:
+                        if "CREATE TABLE" in stmt_upper:
                             parts = stmt_clean.split('"')
                             tname = parts[1] if len(parts) > 1 else "Table"
                             tname_upper = tname.upper()
@@ -872,9 +875,9 @@ def run_conversion_and_apply(sqlite_path: str, output_sql: str, pg_host="localho
                 logger.info("Starting attribute synchronization...")
                 sync_table_columns(sqlite_path, conn, srid)
 
-                # V2: Schema diff report
+                # V2: Schema diff report (with optional drop)
                 logger.info("Detecting schema differences...")
-                detect_schema_differences(sqlite_path, conn)
+                detect_schema_differences(sqlite_path, conn, allow_drop=allow_drop)
 
                 # V2: Data synchronization (optional)
                 if sync_data_flag:
@@ -934,25 +937,29 @@ def find_all_autodesk_sqlites(search_dir: str = None, model_name: str = None) ->
 
                 file_stem = Path(full_path).stem
 
-                if file_stem.lower().startswith("drawing") or file_stem.lower() == "datamodel":
-                    doc_name = get_industry_model_name(full_path)
-                    if doc_name and doc_name.lower() != "industry model 1":
-                        raw_name = doc_name
-                    else:
-                        parent_name = Path(full_path).parent.name
-                        raw_name = f"{file_stem}_{parent_name[:6]}"
-                else:
+                doc_name = get_industry_model_name(full_path)
+                if doc_name:
+                    raw_name = doc_name
+                elif not file_stem.lower().startswith("drawing") and file_stem.lower() != "datamodel":
                     raw_name = file_stem
+                else:
+                    parent_name = Path(full_path).parent.name
+                    raw_name = f"{file_stem}_{parent_name[:6]}"
 
                 db_name = clean_postgres_db_name(raw_name)
                 if not db_name:
                     db_name = "industry_model"
 
-                if db_name in used_db_names:
-                    used_db_names[db_name] += 1
-                    db_name = f"{db_name}_{used_db_names[db_name]}"
-                else:
-                    used_db_names[db_name] = 1
+                # Deduplicate only if different files resolve to the same db_name
+                if db_name in used_db_names and used_db_names[db_name] != full_path:
+                    counter = 1
+                    alt_db_name = f"{db_name}_{counter}"
+                    while alt_db_name in used_db_names and used_db_names[alt_db_name] != full_path:
+                        counter += 1
+                        alt_db_name = f"{db_name}_{counter}"
+                    db_name = alt_db_name
+
+                used_db_names[db_name] = full_path
 
                 mtime = os.path.getmtime(full_path)
                 output_sql = f"schema_{db_name}.sql"
@@ -1002,13 +1009,12 @@ class AutodeskSQLiteHandler:
         self.model_name = model_name
 
 
-if HAS_WATCHDOG:
-    class _WatchdogHandler(FileSystemEventHandler):
+class _WatchdogHandler(FileSystemEventHandler):
         """Internal watchdog handler with debounce logic."""
 
         DEBOUNCE_SECONDS = 3.0
 
-        def __init__(self, pg_host, pg_port, pg_user, pg_pass, pg_db, srid, output_sql, sync_data_flag, model_name):
+        def __init__(self, pg_host, pg_port, pg_user, pg_pass, pg_db, srid, output_sql, sync_data_flag, allow_drop, model_name):
             super().__init__()
             self.pg_host = pg_host
             self.pg_port = pg_port
@@ -1018,6 +1024,7 @@ if HAS_WATCHDOG:
             self.srid = srid
             self.output_sql = output_sql
             self.sync_data_flag = sync_data_flag
+            self.allow_drop = allow_drop
             self.model_name = model_name
             self._last_triggered = {}  # file_path -> timestamp
             self._monitored = {}  # file_path -> {db_name, output_sql}
@@ -1068,7 +1075,8 @@ if HAS_WATCHDOG:
                 pg_pass=self.pg_pass,
                 pg_db=db_name,
                 srid=self.srid,
-                sync_data_flag=self.sync_data_flag
+                sync_data_flag=self.sync_data_flag,
+                allow_drop=self.allow_drop
             )
 
         def on_modified(self, event):
@@ -1085,7 +1093,7 @@ if HAS_WATCHDOG:
 def watch_file(sqlite_path: str = None, search_dir: str = None, model_name: str = None,
                output_sql: str = None, pg_host="localhost", pg_port=5432, pg_user=None,
                pg_pass=None, pg_db=None, srid: int = 2154, run_initial_sync: bool = False,
-               sync_data_flag: bool = False):
+               sync_data_flag: bool = False, allow_drop: bool = False):
     """
     Multi-model monitoring service:
     Uses watchdog (if available) or polling fallback.
@@ -1145,7 +1153,8 @@ def watch_file(sqlite_path: str = None, search_dir: str = None, model_name: str 
                 pg_pass=pg_pass,
                 pg_db=db,
                 srid=srid,
-                sync_data_flag=sync_data_flag
+                sync_data_flag=sync_data_flag,
+                allow_drop=allow_drop
             )
 
     # V2: Choose watchdog or polling
@@ -1155,26 +1164,26 @@ def watch_file(sqlite_path: str = None, search_dir: str = None, model_name: str 
             watch_dir=watch_dir,
             pg_host=pg_host, pg_port=pg_port, pg_user=pg_user, pg_pass=pg_pass,
             pg_db=pg_db, srid=srid, output_sql=output_sql,
-            sync_data_flag=sync_data_flag, model_name=model_name
+            sync_data_flag=sync_data_flag, allow_drop=allow_drop, model_name=model_name
         )
     else:
         logger.warning("Watchdog not installed. Falling back to polling mode (every %ds). "
-                        "Install with: pip install watchdog", CHECK_INTERVAL_SECONDS)
+                       "Install with: pip install watchdog", CHECK_INTERVAL_SECONDS)
         _watch_with_polling(
             sqlite_path=sqlite_path, search_dir=search_dir, model_name=model_name,
             output_sql=output_sql, pg_host=pg_host, pg_port=pg_port, pg_user=pg_user,
             pg_pass=pg_pass, pg_db=pg_db, srid=srid, monitored=monitored,
-            sync_data_flag=sync_data_flag
+            sync_data_flag=sync_data_flag, allow_drop=allow_drop
         )
 
 
 def _watch_with_watchdog(watch_dir, pg_host, pg_port, pg_user, pg_pass, pg_db, srid,
-                          output_sql, sync_data_flag, model_name):
+                          output_sql, sync_data_flag, allow_drop, model_name):
     """Run monitoring using watchdog Observer."""
     handler = _WatchdogHandler(
         pg_host=pg_host, pg_port=pg_port, pg_user=pg_user, pg_pass=pg_pass,
         pg_db=pg_db, srid=srid, output_sql=output_sql,
-        sync_data_flag=sync_data_flag, model_name=model_name
+        sync_data_flag=sync_data_flag, allow_drop=allow_drop, model_name=model_name
     )
     observer = Observer()
     observer.schedule(handler, watch_dir, recursive=True)
@@ -1191,7 +1200,7 @@ def _watch_with_watchdog(watch_dir, pg_host, pg_port, pg_user, pg_pass, pg_db, s
 
 def _watch_with_polling(sqlite_path, search_dir, model_name, output_sql,
                          pg_host, pg_port, pg_user, pg_pass, pg_db, srid,
-                         monitored, sync_data_flag):
+                         monitored, sync_data_flag, allow_drop):
     """Run monitoring using polling fallback."""
     logger.info("Polling mode active (every %ds). Press CTRL+C to stop.", CHECK_INTERVAL_SECONDS)
 
@@ -1239,7 +1248,7 @@ def _watch_with_polling(sqlite_path, search_dir, model_name, output_sql,
                         sqlite_path=fpath, output_sql=out_sql,
                         pg_host=pg_host, pg_port=pg_port, pg_user=pg_user,
                         pg_pass=pg_pass, pg_db=db, srid=srid,
-                        sync_data_flag=sync_data_flag
+                        sync_data_flag=sync_data_flag, allow_drop=allow_drop
                     )
 
                 elif curr_mtime != monitored[fpath]["mtime"]:
@@ -1249,7 +1258,7 @@ def _watch_with_polling(sqlite_path, search_dir, model_name, output_sql,
                         sqlite_path=fpath, output_sql=out_sql,
                         pg_host=pg_host, pg_port=pg_port, pg_user=pg_user,
                         pg_pass=pg_pass, pg_db=db, srid=srid,
-                        sync_data_flag=sync_data_flag
+                        sync_data_flag=sync_data_flag, allow_drop=allow_drop
                     )
 
             if not any_change and heartbeat_counter >= HEARTBEAT_EVERY:
@@ -1288,6 +1297,8 @@ if __name__ == "__main__":
                         help="Enable data synchronization (upsert) in addition to schema sync (default: True).")
     parser.add_argument("--no-sync-data", dest="sync_data", action="store_false",
                         help="Disable data synchronization (only sync schema).")
+    parser.add_argument("--allow-drop", dest="allow_drop", action="store_true", default=False,
+                        help="Automatically drop PostgreSQL columns/tables that were deleted from the Autodesk Industry Model.")
     parser.add_argument("--log-file", dest="log_file", default="connector_sync.log",
                         help="Path to log file (default: connector_sync.log)")
     parser.add_argument("-v", "--verbose", action="store_true", help="Enable verbose/debug logging")
@@ -1308,5 +1319,6 @@ if __name__ == "__main__":
         pg_db=args.pg_db,
         srid=args.srid,
         run_initial_sync=args.initial_sync,
-        sync_data_flag=args.sync_data
+        sync_data_flag=args.sync_data,
+        allow_drop=args.allow_drop
     )
