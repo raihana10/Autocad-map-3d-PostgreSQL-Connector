@@ -1284,9 +1284,12 @@ if __name__ == "__main__":
     parser.add_argument("--initial-sync", action="store_true", help="Execute an immediate synchronization at startup.")
 
     # V2 options
-    parser.add_argument("--sync-data", dest="sync_data", action="store_true", default=False,
-                        help="Enable data synchronization (upsert) in addition to schema sync.")
-    parser.add_argument("--log-file", dest="log_file", default=None, help="Path to log file (e.g. sync.log)")
+    parser.add_argument("--sync-data", dest="sync_data", action="store_true", default=True,
+                        help="Enable data synchronization (upsert) in addition to schema sync (default: True).")
+    parser.add_argument("--no-sync-data", dest="sync_data", action="store_false",
+                        help="Disable data synchronization (only sync schema).")
+    parser.add_argument("--log-file", dest="log_file", default="connector_sync.log",
+                        help="Path to log file (default: connector_sync.log)")
     parser.add_argument("-v", "--verbose", action="store_true", help="Enable verbose/debug logging")
 
     args = parser.parse_args()

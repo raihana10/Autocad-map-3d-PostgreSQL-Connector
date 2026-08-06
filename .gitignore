@@ -1,0 +1,39 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Pytest cache
+.pytest_cache/
+.coverage
+htmlcov/
+.nox/
+.tox/
+
+# Virtual environments
+venv/
+env/
+ENV/
+.venv/
+
+# Generated logs
+*.log
+connector_sync.log
+converter.log
+
+# Generated SQL schemas and reports
+schema_*.sql
+schema_diff_*.json
+
+# SQLite temporary database files
+*.sqlite
+*.sqlite3
+*.db
+*.db-wal
+*.db-shm
+
+# IDE & OS files
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
