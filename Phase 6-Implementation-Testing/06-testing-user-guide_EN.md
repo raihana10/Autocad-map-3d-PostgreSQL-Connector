@@ -97,6 +97,9 @@ While `watch_and_sync.py` is running in the background console:
 2. Save.
 3. **Observation:** The service automatically executes `ALTER TABLE "table" ADD COLUMN "column_name" Type`.
 
+> 💡 **Note on Class Renaming (SQL Table Name vs Display Caption):**  
+> In Autodesk Infrastructure Administrator, editing a class title in the tree view updates the `CAPTION` property (the user-friendly display label) while **retaining the physical SQL table name** (`NAME`). The PostgreSQL connector uses the physical SQL table name to create and manage PostgreSQL tables (`CREATE TABLE "PHYSICAL_NAME"`), while logging the display caption in DDL comments.
+
 ---
 
 ## Step 4: Physical Deletion Sync Test
