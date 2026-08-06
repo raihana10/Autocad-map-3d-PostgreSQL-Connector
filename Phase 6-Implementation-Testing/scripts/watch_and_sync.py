@@ -758,24 +758,32 @@ def ensure_pg_database_exists(host="localhost", port=5432, user="postgres", pass
 # 7. CONVERSION & APPLICATION ENGINE
 # =============================================================================
 
-def run_conversion_and_apply(sqlite_path: str, output_sql: str, pg_host="localhost", pg_port=5432,
-                              pg_user="postgres", pg_pass="", pg_db=None, srid: int = 2154,
-                              sync_data_flag: bool = False):
-    """
-    Executes the conversion script and applies the DDL directly to PostgreSQL.
-    """
-    logger.info("Modification detected in %s!", Path(sqlite_path).name)
-    logger.info("Launching Python converter automatically...")
+# =============================================================================
+# 6.5 HELPER FUNCTIONS FOR POSTGRESQL INSPECTION
+# =============================================================================
 
-    if not pg_db:
-        model_name = get_industry_model_name(sqlite_path)
-        if model_name:
-            cleaned_db = clean_postgres_db_name(model_name)
-            if cleaned_db:
-                logger.info("Industry Model detected: '%s' -> Target DB: '%s'", model_name, cleaned_db)
-                pg_db = cleaned_db
-            else:
-                pg_db = clean_postgres_db_name(Path(sqlite_path).stem)
+def get_existing_tables(cursor) -> set:
+    """Returns a set of uppercase table names in the public schema."""
+    cursor.execute("SELECT table_name FROM information_schema.tables WHERE table_schema = 'public';")
+    return {row[0].upper() for row in cursor.fetchall()}
+
+
+def get_existing_indexes(cursor) -> set:
+    """Returns a set of uppercase index names in the public schema."""
+    cursor.execute("SELECT indexname FROM pg_indexes WHERE schemaname = 'public';")
+    return {row[0].upper() for row in cursor.fetchall()}
+
+
+def get_existing_triggers(cursor) -> set:
+    """Returns a set of uppercase trigger names in the public schema."""
+    cursor.execute("SELECT trigger_name FROM information_schema.triggers WHERE trigger_schema = 'public';")
+    return {row[0].upper() for row in cursor.fetchall()}
+
+
+# =============================================================================
+# 7. CONVERSION & APPLICATION ENGINE
+# =============================================================================
+
 def run_conversion_and_apply(sqlite_path: str, output_sql: str, pg_host: str, pg_port: int,
                              pg_user: str, pg_pass: str, pg_db: str, srid: int,
                              sync_data_flag: bool = False, allow_drop: bool = False):
