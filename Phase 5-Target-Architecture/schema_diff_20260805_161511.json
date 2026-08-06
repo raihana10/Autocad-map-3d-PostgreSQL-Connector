@@ -1,0 +1,12 @@
+{
+  "V_TEST": {
+    "missing_in_pg": [
+      "COL_B",
+      "FID"
+    ],
+    "orphan_in_pg": [
+      "COL_ORPHAN"
+    ],
+    "type_mismatch": {}
+  }
+}
