@@ -97,6 +97,9 @@ Pendant que le script `watch_and_sync.py` tourne en arrière-plan dans la consol
 2. Enregistrez.
 3. **Observation :** Le service exécute automatiquement `ALTER TABLE "table" ADD COLUMN "nom_colonne" Type`.
 
+> 💡 **Note sur le renommage des classes (Nom SQL vs Libellé/Caption) :**  
+> Dans Autodesk Infrastructure Administrator, modifier le titre d'une classe dans l'arborescence met à jour la propriété `CAPTION` (libellé d'affichage pour l'utilisateur) mais **conserve le nom physique de la table SQL** (`NAME`). Le connecteur PostgreSQL utilise le nom de table SQL physique pour créer la table (`CREATE TABLE "NOM_PHYSIQUE"`) tout en consignant le libellé d'affichage dans les commentaires du DDL.
+
 ---
 
 ## 🚀 Étape 4 : Test de Suppression Physique (Physical Deletion)
