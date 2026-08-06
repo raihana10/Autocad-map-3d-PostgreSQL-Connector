@@ -940,15 +940,18 @@ def find_all_autodesk_sqlites(search_dir: str = None, model_name: str = None) ->
             if full_path in seen_paths:
                 continue
 
+
             if is_autodesk_sqlite(full_path):
                 seen_paths.add(full_path)
 
                 file_stem = Path(full_path).stem
 
-                doc_name = get_industry_model_name(full_path)
-                if doc_name:
-                    raw_name = doc_name
-                elif not file_stem.lower().startswith("drawing") and file_stem.lower() != "datamodel":
+                # Use the filesystem name (file stem / parent folder) as the stable database identifier.
+                # TB_INFO DOCUMENT_NAME is kept as a human-readable label but NOT used for db naming,
+                # because Autodesk can write the same DOCUMENT_NAME into multiple temp files.
+                doc_name = get_industry_model_name(full_path)  # human-readable label only
+
+                if not file_stem.lower().startswith("drawing") and file_stem.lower() != "datamodel":
                     raw_name = file_stem
                 else:
                     parent_name = Path(full_path).parent.name
@@ -958,13 +961,13 @@ def find_all_autodesk_sqlites(search_dir: str = None, model_name: str = None) ->
                 if not db_name:
                     db_name = "industry_model"
 
-                # If multiple temp files resolve to the same db_name, keep the most recently modified one
+                # Strict deduplication by exact file path — no suffix appending
                 if db_name in used_db_names:
                     existing_index = used_db_names[db_name]
                     if found_models[existing_index]["mtime"] < os.path.getmtime(full_path):
                         found_models[existing_index] = {
                             "path": full_path,
-                            "model_name": raw_name,
+                            "model_name": doc_name or raw_name,
                             "db_name": db_name,
                             "output_sql": f"schema_{db_name}.sql",
                             "mtime": os.path.getmtime(full_path)
@@ -977,11 +980,13 @@ def find_all_autodesk_sqlites(search_dir: str = None, model_name: str = None) ->
 
                 found_models.append({
                     "path": full_path,
-                    "model_name": raw_name,
+                    "model_name": doc_name or raw_name,
                     "db_name": db_name,
                     "output_sql": output_sql,
                     "mtime": mtime
                 })
+
+
 
     return found_models
 
