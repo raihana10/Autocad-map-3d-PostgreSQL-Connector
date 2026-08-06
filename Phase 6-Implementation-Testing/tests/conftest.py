@@ -6,9 +6,14 @@ MODULE  : pytest fixtures for unit and integration testing
 ===============================================================================
 """
 
+import sys
+import os
 import sqlite3
 import pytest
 from unittest.mock import MagicMock
+
+# Add scripts directory to sys.path
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "../scripts")))
 
 
 @pytest.fixture
