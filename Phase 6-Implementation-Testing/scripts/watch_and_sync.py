@@ -958,17 +958,20 @@ def find_all_autodesk_sqlites(search_dir: str = None, model_name: str = None) ->
                 if not db_name:
                     db_name = "industry_model"
 
-                # Deduplicate only if different files resolve to the same db_name
-                if db_name in used_db_names and used_db_names[db_name] != full_path:
-                    counter = 1
-                    alt_db_name = f"{db_name}_{counter}"
-                    while alt_db_name in used_db_names and used_db_names[alt_db_name] != full_path:
-                        counter += 1
-                        alt_db_name = f"{db_name}_{counter}"
-                    db_name = alt_db_name
+                # If multiple temp files resolve to the same db_name, keep the most recently modified one
+                if db_name in used_db_names:
+                    existing_index = used_db_names[db_name]
+                    if found_models[existing_index]["mtime"] < os.path.getmtime(full_path):
+                        found_models[existing_index] = {
+                            "path": full_path,
+                            "model_name": raw_name,
+                            "db_name": db_name,
+                            "output_sql": f"schema_{db_name}.sql",
+                            "mtime": os.path.getmtime(full_path)
+                        }
+                    continue
 
-                used_db_names[db_name] = full_path
-
+                used_db_names[db_name] = len(found_models)
                 mtime = os.path.getmtime(full_path)
                 output_sql = f"schema_{db_name}.sql"
 
