@@ -64,10 +64,12 @@ def test_detect_schema_differences(temp_sqlite_file, mock_pg_conn):
 
     # Mock PG responses:
     # 1. EXISTS query -> True
-    # 2. columns query -> return COL_A and COL_ORPHAN (COL_B missing in PG, COL_ORPHAN extra in PG)
+    # 2. PG tables query -> [("V_TEST",)]
+    # 3. PG columns query -> return COL_A and COL_ORPHAN (COL_B missing in PG, COL_ORPHAN extra in PG)
     pg_cursor = mock_pg_conn.cursor.return_value
     pg_cursor.fetchone.side_effect = [(True,)]
     pg_cursor.fetchall.side_effect = [
+        [("V_TEST",)],
         [("COL_A", "text"), ("COL_ORPHAN", "varchar")]
     ]
 
