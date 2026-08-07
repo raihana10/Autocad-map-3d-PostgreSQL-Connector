@@ -859,6 +859,38 @@ def ensure_pg_database_exists(host="localhost", port=5432, user="postgres", pass
         logger.error("Error while checking/creating PostgreSQL database: %s", e, exc_info=True)
 
 
+def ensure_pk_sequences(pg_conn):
+    """
+    Ensures all user tables in public schema have an auto-incrementing sequence 
+    attached to their "FID" primary key column. Upgrades pre-existing tables 
+    where column_default is NULL or missing nextval.
+    """
+    try:
+        cursor = pg_conn.cursor()
+        cursor.execute("""
+            SELECT c.table_name, c.column_default
+            FROM information_schema.columns c
+            JOIN information_schema.tables t ON c.table_name = t.table_name
+            WHERE c.table_schema = 'public' 
+              AND c.column_name = 'FID'
+              AND t.table_type = 'BASE TABLE';
+        """)
+        rows = cursor.fetchall()
+        for tbl_name, col_default in rows:
+            if tbl_name.lower() in _PG_SYSTEM_TABLES:
+                continue
+            if not col_default or 'nextval' not in str(col_default).lower():
+                seq_name = f"{tbl_name}_FID_seq"
+                logger.info("Upgrading primary key sequence for table '%s'...", tbl_name)
+                cursor.execute(f'CREATE SEQUENCE IF NOT EXISTS "{seq_name}";')
+                cursor.execute(f'ALTER TABLE "{tbl_name}" ALTER COLUMN "FID" SET DEFAULT nextval(\'"{seq_name}"\'::regclass);')
+                cursor.execute(f'ALTER SEQUENCE "{seq_name}" OWNED BY "{tbl_name}"."FID";')
+                cursor.execute(f'SELECT setval(\'"{seq_name}"\', COALESCE((SELECT MAX("FID") FROM "{tbl_name}"), 0) + 1, false);')
+        cursor.close()
+    except Exception as e:
+        logger.error("Error upgrading PK sequences: %s", e, exc_info=True)
+
+
 # Helper inspection queries
 def get_existing_tables(cursor) -> set:
     """Returns set of uppercase table names in public schema."""
@@ -979,6 +1011,10 @@ def run_conversion_and_apply(sqlite_path: str, output_sql: str, pg_host: str, pg
                         first_line = stmt_clean.splitlines()[0][:120]
                         failed_statements.append((first_line, str(ex)))
                         logger.error("SQL Error: %s -> %s", first_line, ex)
+
+                # Ensure all PK columns have sequences attached (upgrades pre-existing tables)
+                logger.info("Ensuring primary key sequences on all tables...")
+                ensure_pk_sequences(conn)
 
                 # Column addition sync
                 logger.info("Starting attribute synchronization...")
