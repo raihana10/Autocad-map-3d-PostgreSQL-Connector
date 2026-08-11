@@ -1245,7 +1245,7 @@ if HAS_WATCHDOG:
 def watch_file(sqlite_path: str = None, search_dir: str = None, model_name: str = None,
                output_sql: str = None, pg_host="localhost", pg_port=5432, pg_user=None,
                pg_pass=None, pg_db=None, srid: int = 2154, run_initial_sync: bool = False,
-               sync_data_flag: bool = False):
+               sync_data_flag: bool = False, stop_event=None):
     """
     Starts the continuous multi-model monitoring service using Watchdog or Polling mode.
     """
@@ -1328,7 +1328,7 @@ def watch_file(sqlite_path: str = None, search_dir: str = None, model_name: str 
 
 
 def _watch_with_watchdog(watch_dir, pg_host, pg_port, pg_user, pg_pass, pg_db, srid,
-                          output_sql, sync_data_flag, model_name):
+                          output_sql, sync_data_flag, model_name, stop_event=None):
     """Event-driven watchdog observer runner."""
     handler = _WatchdogHandler(
         pg_host=pg_host, pg_port=pg_port, pg_user=pg_user, pg_pass=pg_pass,
@@ -1339,18 +1339,18 @@ def _watch_with_watchdog(watch_dir, pg_host, pg_port, pg_user, pg_pass, pg_db, s
     observer.schedule(handler, watch_dir, recursive=True)
     observer.start()
     try:
-        while True:
+        while not (stop_event and stop_event.is_set()):
             time.sleep(1)
     except KeyboardInterrupt:
         logger.info("Stopping watchdog observer...")
-        observer.stop()
+    observer.stop()
     observer.join()
     logger.info("Multi-model monitoring service stopped.")
 
 
 def _watch_with_polling(sqlite_path, search_dir, model_name, output_sql,
                          pg_host, pg_port, pg_user, pg_pass, pg_db, srid,
-                         monitored, sync_data_flag):
+                         monitored, sync_data_flag, stop_event=None):
     """Timer-driven polling observer fallback runner."""
     logger.info("Polling mode active (every %ds). Press CTRL+C to stop.", CHECK_INTERVAL_SECONDS)
 
@@ -1358,7 +1358,7 @@ def _watch_with_polling(sqlite_path, search_dir, model_name, output_sql,
         heartbeat_counter = 0
         HEARTBEAT_EVERY = 5
 
-        while True:
+        while not (stop_event and stop_event.is_set()):
             time.sleep(CHECK_INTERVAL_SECONDS)
             heartbeat_counter += 1
 
@@ -1423,7 +1423,12 @@ def _watch_with_polling(sqlite_path, search_dir, model_name, output_sql,
 # 11. CLI ENTRY POINT
 # =============================================================================
 
-if __name__ == "__main__":
+def build_arg_parser():
+    """
+    Builds and returns the CLI argument parser.
+    Exposed as a public function so gui_tray_app.py can construct args
+    programmatically without calling parse_args() from sys.argv.
+    """
     parser = argparse.ArgumentParser(
         description="Monitors one or more Autodesk Data Models and automatically applies DDL to PostgreSQL."
     )
@@ -1450,22 +1455,42 @@ if __name__ == "__main__":
     parser.add_argument("--log-file", dest="log_file", default="connector_sync.log",
                         help="Path to log file (default: connector_sync.log)")
     parser.add_argument("-v", "--verbose", action="store_true", help="Enable verbose/debug logging")
+    return parser
 
-    args = parser.parse_args()
 
-    setup_logging(log_file=args.log_file, verbose=args.verbose)
+def main(args=None, stop_event=None):
+    """
+    Main entry point for the sync service.
+    Can be called programmatically from gui_tray_app.py with pre-parsed args
+    and a threading.Event() stop_event to allow graceful shutdown.
+
+    Args:
+        args: Parsed argparse.Namespace object (or None to parse from sys.argv).
+        stop_event: threading.Event() — set it to request service shutdown.
+    """
+    parser = build_arg_parser()
+    if args is None:
+        args = parser.parse_args()
+
+    setup_logging(log_file=getattr(args, 'log_file', 'connector_sync.log'),
+                  verbose=getattr(args, 'verbose', False))
 
     watch_file(
-        sqlite_path=args.sqlite_file,
-        search_dir=args.search_dir,
-        model_name=args.model_name,
-        output_sql=args.output_sql,
-        pg_host=args.pg_host,
-        pg_port=args.pg_port,
-        pg_user=args.pg_user,
-        pg_pass=args.pg_pass,
-        pg_db=args.pg_db,
-        srid=args.srid,
-        run_initial_sync=args.initial_sync,
-        sync_data_flag=args.sync_data,
+        sqlite_path=getattr(args, 'sqlite_file', None),
+        search_dir=getattr(args, 'search_dir', None),
+        model_name=getattr(args, 'model_name', None),
+        output_sql=getattr(args, 'output_sql', None),
+        pg_host=getattr(args, 'pg_host', 'localhost'),
+        pg_port=getattr(args, 'pg_port', 5432),
+        pg_user=getattr(args, 'pg_user', None),
+        pg_pass=getattr(args, 'pg_pass', None),
+        pg_db=getattr(args, 'pg_db', None),
+        srid=getattr(args, 'srid', 2154),
+        run_initial_sync=getattr(args, 'initial_sync', False),
+        sync_data_flag=getattr(args, 'sync_data', True),
+        stop_event=stop_event,
     )
+
+
+if __name__ == "__main__":
+    main()
