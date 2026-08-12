@@ -23,8 +23,9 @@ AppCopyright=Copyright (C) 2025
 DefaultDirName={autopf}\Autodesk PostgreSQL Connector
 DefaultGroupName=Autodesk PostgreSQL Connector
 
-; Require administrator privileges for installation
-PrivilegesRequired=admin
+; No admin required — tray app runs in user context
+PrivilegesRequired=lowest
+PrivilegesRequiredOverridesAllowed=dialog
 
 ; Output installer file
 OutputDir=installer_output
@@ -58,13 +59,15 @@ Name: "{group}\Autodesk PostgreSQL Connector";           Filename: "{app}\Autode
 Name: "{group}\Uninstall Autodesk PostgreSQL Connector"; Filename: "{uninstallexe}"
 
 ; Desktop shortcut (optional)
-Name: "{commondesktop}\Autodesk PostgreSQL Connector";   Filename: "{app}\AutodeskPostgreSQLConnector.exe"; Tasks: desktopicon
+Name: "{userdesktop}\Autodesk PostgreSQL Connector";     Filename: "{app}\AutodeskPostgreSQLConnector.exe"; Tasks: desktopicon
 
-; Windows Startup shortcut — auto-start at every Windows logon
-Name: "{userstartup}\Autodesk PostgreSQL Connector";     Filename: "{app}\AutodeskPostgreSQLConnector.exe"
+[Registry]
+; Auto-start at Windows logon via HKCU registry (reliable, no admin needed)
+Root: HKCU; Subkey: "Software\Microsoft\Windows\CurrentVersion\Run"; ValueType: string; ValueName: "AutodeskPostgreSQLConnector"; ValueData: """{app}\AutodeskPostgreSQLConnector.exe"""; Tasks: autostart; Flags: uninsdeletevalue
 
 [Tasks]
 Name: "desktopicon"; Description: "Create a &desktop shortcut"; GroupDescription: "Additional icons:"
+Name: "autostart";   Description: "Launch automatically at Windows startup"; GroupDescription: "Startup options:"; Flags: checked
 
 [Run]
 ; Launch the application immediately after installation finishes
@@ -72,7 +75,7 @@ Filename: "{app}\AutodeskPostgreSQLConnector.exe"; Description: "Launch Autodesk
 
 [UninstallRun]
 ; Kill the process before uninstalling
-Filename: "taskkill"; Parameters: "/F /IM AutodeskPostgreSQLConnector.exe"; Flags: runhidden
+Filename: "taskkill"; Parameters: "/F /IM AutodeskPostgreSQLConnector.exe"; RunOnceId: "KillConnector"; Flags: runhidden
 
 [UninstallDelete]
 ; Clean up config and log files

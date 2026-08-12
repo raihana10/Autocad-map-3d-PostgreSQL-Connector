@@ -44,13 +44,15 @@ from datetime import datetime
 # ---------------------------------------------------------------------------
 # Resolve working directory (handles both dev mode and PyInstaller onefile)
 # ---------------------------------------------------------------------------
-if getattr(sys, "frozen", False):
-    BASE_DIR = Path(sys.executable).parent
-else:
-    BASE_DIR = Path(__file__).parent
+# IMPORTANT: Config and logs MUST be stored in a user-writable directory.
+# Writing to the install dir (e.g. Program Files) causes PermissionError.
+# We use %APPDATA%\AutodeskPostgreSQLConnector which is always writable.
+APP_DATA_DIR = Path(os.environ.get("APPDATA", Path.home())) / "AutodeskPostgreSQLConnector"
+APP_DATA_DIR.mkdir(parents=True, exist_ok=True)
 
-CONFIG_FILE = BASE_DIR / "connector_config.json"
-LOG_FILE    = BASE_DIR / "connector.log"
+CONFIG_FILE = APP_DATA_DIR / "connector_config.json"
+LOG_FILE    = APP_DATA_DIR / "connector.log"
+
 
 # ---------------------------------------------------------------------------
 # Logging setup (dual: file + in-memory for GUI log viewer)
