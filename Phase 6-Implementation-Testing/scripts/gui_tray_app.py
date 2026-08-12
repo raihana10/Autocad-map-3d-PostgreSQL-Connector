@@ -49,8 +49,8 @@ if getattr(sys, "frozen", False):
 else:
     BASE_DIR = Path(__file__).parent
 
-CONFIG_FILE = BASE_DIR / "connector_config.json"
-LOG_FILE    = BASE_DIR / "connector.log"
+CONFIG_ENV_FILE = BASE_DIR / "config.env"
+LOG_FILE        = BASE_DIR / "connector.log"
 
 # ---------------------------------------------------------------------------
 # Logging setup (dual: file + in-memory for GUI log viewer)
@@ -100,7 +100,7 @@ class _MemoryLogHandler(logging.Handler):
 
 
 # ---------------------------------------------------------------------------
-# Config helpers
+# Config helpers (reads and writes config.env)
 # ---------------------------------------------------------------------------
 DEFAULT_CONFIG = {
     "pg_host": "localhost",
@@ -108,23 +108,54 @@ DEFAULT_CONFIG = {
     "pg_user": "postgres",
     "pg_pass": "",
     "srid": "2154",
-    "watch_dir": "",
     "auto_start": True,
 }
 
-def load_config():
-    if CONFIG_FILE.exists():
+def load_config() -> dict:
+    """Reads config.env and returns a dictionary of settings."""
+    cfg = dict(DEFAULT_CONFIG)
+    if CONFIG_ENV_FILE.exists():
         try:
-            with open(CONFIG_FILE, encoding="utf-8") as f:
-                data = json.load(f)
-                return {**DEFAULT_CONFIG, **data}
-        except Exception:
-            pass
-    return dict(DEFAULT_CONFIG)
+            with open(CONFIG_ENV_FILE, "r", encoding="utf-8") as f:
+                for line in f:
+                    line = line.strip()
+                    if not line or line.startswith("#") or "=" not in line:
+                        continue
+                    k, v = line.split("=", 1)
+                    k = k.strip().upper()
+                    v = v.strip().strip("'\"")
+                    if k == "PG_HOST":
+                        cfg["pg_host"] = v
+                    elif k == "PG_PORT":
+                        cfg["pg_port"] = v
+                    elif k == "PG_USER":
+                        cfg["pg_user"] = v
+                    elif k in ("PG_PASS", "PG_PASSWORD"):
+                        cfg["pg_pass"] = v
+                    elif k in ("PG_SRID", "SRID"):
+                        cfg["srid"] = v
+                    elif k == "AUTO_START":
+                        cfg["auto_start"] = (v.lower() in ("true", "1", "yes"))
+        except Exception as err:
+            logger.warning("Could not read config.env: %s", err)
+    return cfg
 
 def save_config(cfg: dict):
-    with open(CONFIG_FILE, "w", encoding="utf-8") as f:
-        json.dump(cfg, f, indent=2)
+    """Persists settings to config.env file."""
+    lines = [
+        "# ===========================================================================",
+        "# Autodesk PostgreSQL Connector Configuration File",
+        "# ===========================================================================",
+        f"PG_HOST={cfg.get('pg_host', 'localhost')}",
+        f"PG_PORT={cfg.get('pg_port', '5432')}",
+        f"PG_USER={cfg.get('pg_user', 'postgres')}",
+        f"PG_PASS={cfg.get('pg_pass', '')}",
+        f"PG_SRID={cfg.get('srid', '2154')}",
+        f"AUTO_START={'True' if cfg.get('auto_start', True) else 'False'}",
+    ]
+    with open(CONFIG_ENV_FILE, "w", encoding="utf-8") as f:
+        f.write("\n".join(lines) + "\n")
+    logger.info("Saved settings to %s", CONFIG_ENV_FILE)
 
 
 # ---------------------------------------------------------------------------
@@ -177,8 +208,6 @@ class SyncEngine:
                 "--srid",    str(cfg.get("srid", "2154")),
                 "--initial-sync",
             ]
-            if cfg.get("watch_dir"):
-                args_list += ["--dir", cfg["watch_dir"]]
 
             import argparse
             parser = ws.build_arg_parser() if hasattr(ws, "build_arg_parser") else _build_fallback_parser()
@@ -225,7 +254,6 @@ class SettingsWindow(tk.Toplevel):
             ("pg_user",  "PostgreSQL User",    "postgres"),
             ("pg_pass",  "PostgreSQL Password",""),
             ("srid",     "SRID / EPSG Code",   "2154"),
-            ("watch_dir","Watch Directory (optional, leave blank for %%TEMP%%)",""),
         ]
 
         frame = ttk.LabelFrame(self, text=" PostgreSQL Connection & Sync Settings ", padding=12)
