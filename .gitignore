@@ -32,6 +32,10 @@ schema_diff_*.json
 *.db-wal
 *.db-shm
 
+# Environment configuration files (passwords)
+config.env
+*.env
+
 # IDE & OS files
 .vscode/
 .idea/

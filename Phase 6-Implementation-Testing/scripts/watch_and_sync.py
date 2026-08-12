@@ -1419,6 +1419,32 @@ def _watch_with_polling(sqlite_path, search_dir, model_name, output_sql,
         logger.info("Multi-model monitoring service stopped.")
 
 
+def load_config_env(env_path: str = None) -> dict:
+    """
+    Reads config.env file from script directory or custom path.
+    Returns dictionary of configuration parameters.
+    """
+    if env_path is None:
+        script_dir = os.path.dirname(os.path.abspath(__file__))
+        env_path = os.path.join(script_dir, "config.env")
+        if not os.path.exists(env_path):
+            env_path = os.path.join(os.getcwd(), "config.env")
+
+    config = {}
+    if os.path.exists(env_path):
+        try:
+            with open(env_path, "r", encoding="utf-8") as f:
+                for line in f:
+                    line = line.strip()
+                    if not line or line.startswith("#") or "=" not in line:
+                        continue
+                    key, val = line.split("=", 1)
+                    config[key.strip().upper()] = val.strip().strip("'\"")
+        except Exception as e:
+            logger.warning("Could not parse config.env file '%s': %s", env_path, e)
+    return config
+
+
 # =============================================================================
 # 11. CLI ENTRY POINT
 # =============================================================================
@@ -1429,6 +1455,8 @@ def build_arg_parser():
     Exposed as a public function so gui_tray_app.py can construct args
     programmatically without calling parse_args() from sys.argv.
     """
+    env_cfg = load_config_env()
+
     parser = argparse.ArgumentParser(
         description="Monitors one or more Autodesk Data Models and automatically applies DDL to PostgreSQL."
     )
@@ -1437,14 +1465,21 @@ def build_arg_parser():
     parser.add_argument("--name", dest="model_name", default=None, help="Specific Industry Model name to search for (optional)")
     parser.add_argument("--out", dest="output_sql", default=None, help="Generated SQL file (default: schema_<dbname>.sql)")
 
-    # PostgreSQL parameters
-    parser.add_argument("--pg-host", dest="pg_host", default="localhost", help="PostgreSQL server host (default: localhost)")
-    parser.add_argument("--pg-port", dest="pg_port", type=int, default=5432, help="PostgreSQL port (default: 5432)")
-    parser.add_argument("--pg-user", dest="pg_user", default=os.getenv("PG_USER"), help="PostgreSQL username (e.g. postgres)")
-    parser.add_argument("--pg-pass", dest="pg_pass", default=os.getenv("PG_PASSWORD"), help="PostgreSQL password")
-    parser.add_argument("--pg-db", dest="pg_db", default=None, help="Target PostgreSQL database name (optional)")
+    # PostgreSQL parameters (Reads from config.env / os.getenv with CLI fallback)
+    default_host = env_cfg.get("PG_HOST") or os.getenv("PG_HOST") or "localhost"
+    default_port = int(env_cfg.get("PG_PORT") or os.getenv("PG_PORT") or 5432)
+    default_user = env_cfg.get("PG_USER") or os.getenv("PG_USER")
+    default_pass = env_cfg.get("PG_PASS") or env_cfg.get("PG_PASSWORD") or os.getenv("PG_PASSWORD")
+    default_db   = env_cfg.get("PG_DB") or os.getenv("PG_DB")
+    default_srid = int(env_cfg.get("PG_SRID") or os.getenv("PG_SRID") or 2154)
 
-    parser.add_argument("--srid", type=int, default=2154, help="EPSG / SRID spatial code for PostGIS (default: 2154)")
+    parser.add_argument("--pg-host", dest="pg_host", default=default_host, help="PostgreSQL server host (default: localhost)")
+    parser.add_argument("--pg-port", dest="pg_port", type=int, default=default_port, help="PostgreSQL port (default: 5432)")
+    parser.add_argument("--pg-user", dest="pg_user", default=default_user, help="PostgreSQL username (e.g. postgres)")
+    parser.add_argument("--pg-pass", dest="pg_pass", default=default_pass, help="PostgreSQL password")
+    parser.add_argument("--pg-db", dest="pg_db", default=default_db, help="Target PostgreSQL database name (optional)")
+
+    parser.add_argument("--srid", type=int, default=default_srid, help="EPSG / SRID spatial code for PostGIS (default: 2154)")
     parser.add_argument("--initial-sync", action="store_true", help="Execute an immediate synchronization at startup.")
 
     # Data sync & logging options
