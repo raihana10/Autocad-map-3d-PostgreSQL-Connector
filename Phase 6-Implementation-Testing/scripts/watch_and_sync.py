@@ -1419,19 +1419,34 @@ def _watch_with_polling(sqlite_path, search_dir, model_name, output_sql,
         logger.info("Multi-model monitoring service stopped.")
 
 
+def find_config_env_file() -> str | None:
+    """Finds existing config.env or .env file in script dir, parent dir, or current working dir."""
+    script_dir = Path(__file__).resolve().parent
+    cwd = Path.cwd()
+    candidates = [
+        script_dir / "config.env",
+        script_dir / ".env",
+        script_dir.parent / "config.env",
+        script_dir.parent / ".env",
+        cwd / "config.env",
+        cwd / ".env",
+    ]
+    for p in candidates:
+        if p.is_file():
+            return str(p)
+    return None
+
+
 def load_config_env(env_path: str = None) -> dict:
     """
-    Reads config.env file from script directory or custom path.
+    Reads config.env or .env file from script directory, parent directory, or custom path.
     Returns dictionary of configuration parameters.
     """
     if env_path is None:
-        script_dir = os.path.dirname(os.path.abspath(__file__))
-        env_path = os.path.join(script_dir, "config.env")
-        if not os.path.exists(env_path):
-            env_path = os.path.join(os.getcwd(), "config.env")
+        env_path = find_config_env_file()
 
     config = {}
-    if os.path.exists(env_path):
+    if env_path and os.path.exists(env_path):
         try:
             with open(env_path, "r", encoding="utf-8") as f:
                 for line in f:
@@ -1440,8 +1455,9 @@ def load_config_env(env_path: str = None) -> dict:
                         continue
                     key, val = line.split("=", 1)
                     config[key.strip().upper()] = val.strip().strip("'\"")
+            logger.info("Loaded environment credentials from: %s", env_path)
         except Exception as e:
-            logger.warning("Could not parse config.env file '%s': %s", env_path, e)
+            logger.warning("Could not parse env file '%s': %s", env_path, e)
     return config
 
 
