@@ -17,7 +17,7 @@ USAGE:
     python build_exe.py
 
 OUTPUT:
-    dist/AutodeskPostgreSQLConnector.exe   (single-file executable)
+    dist/PostMapLive.exe   (single-file executable)
 ===============================================================================
 """
 
@@ -32,7 +32,7 @@ BUILD_DIR   = SCRIPTS_DIR.parent / "build"
 
 def main():
     print("=" * 65)
-    print("  Building AutodeskPostgreSQLConnector.exe with PyInstaller")
+    print("  Building PostMapLive.exe with PyInstaller")
     print("=" * 65)
 
     ASSETS_DIR  = SCRIPTS_DIR.parent / "assets"
@@ -41,7 +41,7 @@ def main():
         sys.executable, "-m", "PyInstaller",
         "--onefile",                                # Single .exe
         "--noconsole",                              # No terminal window (GUI mode)
-        "--name", "AutodeskPostgreSQLConnector",
+        "--name", "PostMapLive",
         "--icon", str(ASSETS_DIR / "app_logo.ico"), # App logo for .exe
         "--distpath", str(DIST_DIR),
         "--workpath", str(BUILD_DIR),
@@ -63,7 +63,7 @@ def main():
         str(SCRIPTS_DIR / "gui_tray_app.py"),
     ]
 
-    exe_path = DIST_DIR / "AutodeskPostgreSQLConnector.exe"
+    exe_path = DIST_DIR / "PostMapLive.exe"
     DIST_DIR.mkdir(parents=True, exist_ok=True)
 
     if exe_path.exists():

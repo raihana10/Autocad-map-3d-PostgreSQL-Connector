@@ -27,7 +27,7 @@ USAGE (development):
     python gui_tray_app.py
 
 USAGE (packaged):
-    dist/AutodeskPostgreSQLConnector.exe  (compiled via build_exe.py)
+    dist/PostMapLive.exe  (compiled via build_exe.py)
 ===============================================================================
 """
 
@@ -47,10 +47,10 @@ from datetime import datetime
 # ---------------------------------------------------------------------------
 # IMPORTANT: Config and logs MUST be stored in a user-writable directory.
 # Writing to the install dir (e.g. Program Files) causes PermissionError.
-# We use %APPDATA%\AutodeskPostgreSQLConnector which is always writable.
+# We use %APPDATA%\PostMapLive which is always writable.
 BASE_DIR = Path(__file__).resolve().parent
 
-APP_DATA_DIR = Path(os.environ.get("APPDATA", Path.home())) / "AutodeskPostgreSQLConnector"
+APP_DATA_DIR = Path(os.environ.get("APPDATA", Path.home())) / "PostMapLive"
 APP_DATA_DIR.mkdir(parents=True, exist_ok=True)
 
 # Persistent config/log storage (AppData, not the temp extraction folder used by PyInstaller)
@@ -175,7 +175,7 @@ def save_config(cfg: dict):
     target_env.parent.mkdir(parents=True, exist_ok=True)
     lines = [
         "# ===========================================================================",
-        "# Autodesk PostgreSQL Connector Configuration File",
+        "# PostMap Live Configuration File",
         "# ===========================================================================",
         f"PG_HOST={cfg.get('pg_host', 'localhost')}",
         f"PG_PORT={cfg.get('pg_port', '5432')}",
@@ -271,7 +271,7 @@ def _build_fallback_parser():
 class SettingsWindow(tk.Toplevel):
     def __init__(self, parent, cfg: dict, on_save):
         super().__init__(parent)
-        self.title("Autodesk PostgreSQL Connector — Settings")
+        self.title("PostMap Live — Settings")
         self.resizable(False, False)
         self.grab_set()
 
@@ -409,8 +409,8 @@ class TrayApp:
     # ---- Tray icon helpers -------------------------------------------------
 
     def _make_icon_image(self, color: str = "#007ACC"):
-        """Loads custom PNG icon image depending on current state, with fallback."""
-        from PIL import Image
+        """Loads a larger, more visible tray icon depending on current state."""
+        from PIL import Image, ImageDraw
 
         # Search locations for assets directory (local dev vs PyInstaller bundle)
         assets_candidates = [
@@ -437,20 +437,20 @@ class TrayApp:
             img_path = assets_dir / filename
             if img_path.is_file():
                 try:
-                    return Image.open(img_path)
+                    img = Image.open(img_path).convert("RGBA")
+                    return img.resize((128, 128), Image.Resampling.LANCZOS)
                 except Exception as exc:
                     logger.warning(f"Could not load icon {img_path}: {exc}")
 
         # Fallback if image file is not found
         try:
-            from PIL import ImageDraw
-            img = Image.new("RGBA", (64, 64), color=(0, 0, 0, 0))
+            img = Image.new("RGBA", (128, 128), color=(0, 0, 0, 0))
             draw = ImageDraw.Draw(img)
-            draw.ellipse([6, 6, 58, 58], fill=color, outline="white", width=2)
-            draw.text((18, 18), "DB", fill="white")
+            draw.ellipse([12, 12, 116, 116], fill=color, outline="white", width=6)
+            draw.text((40, 46), "DB", fill="white", font=None)
             return img
         except Exception:
-            return Image.new("RGBA", (64, 64), color=color)
+            return Image.new("RGBA", (128, 128), color=color)
 
     def _build_menu(self):
         import pystray
@@ -499,7 +499,7 @@ class TrayApp:
         self._update_icon_color()
 
     def _exit(self):
-        logger.info("Exiting Autodesk PostgreSQL Connector.")
+        logger.info("Exiting PostMap Live.")
         self.engine.stop()
         if self._icon:
             self._icon.stop()
@@ -525,7 +525,7 @@ class TrayApp:
     def run(self):
         import pystray
         setup_logging()
-        logger.info("Autodesk PostgreSQL Connector starting...")
+        logger.info("PostMap Live starting...")
 
         # Auto-start sync if configured
         if self.cfg.get("auto_start", True):
@@ -533,9 +533,9 @@ class TrayApp:
 
         icon_img = self._make_icon_image("#28A745" if self.engine.is_running() else "#DC3545")
         self._icon = pystray.Icon(
-            name="AutodeskPostgreSQLConnector",
+            name="PostMapLive",
             icon=icon_img,
-            title="Autodesk → PostgreSQL Sync",
+            title="PostMap Live",
             menu=self._build_menu(),
         )
 
@@ -552,7 +552,7 @@ class TrayApp:
 # ---------------------------------------------------------------------------
 def ensure_single_instance():
     """Prevents multiple instances of the tray app from running at once."""
-    mutex_name = "Global\\AutodeskPostgreSQLConnectorSingleInstance"
+    mutex_name = "Global\\PostMapLiveSingleInstance"
     mutex = ctypes.windll.kernel32.CreateMutexW(None, False, mutex_name)
     if mutex is None or ctypes.windll.kernel32.GetLastError() == 183:
         return False
