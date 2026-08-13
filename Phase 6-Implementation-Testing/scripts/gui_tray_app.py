@@ -34,6 +34,7 @@ USAGE (packaged):
 import os
 import sys
 import json
+import ctypes
 import threading
 import logging
 import tkinter as tk
@@ -52,9 +53,9 @@ BASE_DIR = Path(__file__).resolve().parent
 APP_DATA_DIR = Path(os.environ.get("APPDATA", Path.home())) / "AutodeskPostgreSQLConnector"
 APP_DATA_DIR.mkdir(parents=True, exist_ok=True)
 
-# JSON settings backup (APPDATA — always writable)
+# Persistent config/log storage (AppData, not the temp extraction folder used by PyInstaller)
+CONFIG_ENV_FILE = APP_DATA_DIR / "config.env"
 CONFIG_FILE     = APP_DATA_DIR / "connector_config.json"
-# Log file (APPDATA — avoids PermissionError when installed in Program Files)
 LOG_FILE        = APP_DATA_DIR / "connector.log"
 
 
@@ -118,8 +119,10 @@ DEFAULT_CONFIG = {
 }
 
 def find_config_env_file() -> Path:
-    """Finds existing config.env or .env file, fallback to BASE_DIR / config.env."""
+    """Finds a persistent config file in AppData first, then falls back to local files."""
     candidates = [
+        APP_DATA_DIR / "config.env",
+        APP_DATA_DIR / ".env",
         BASE_DIR / "config.env",
         BASE_DIR / ".env",
         BASE_DIR.parent / "config.env",
@@ -130,7 +133,7 @@ def find_config_env_file() -> Path:
     for p in candidates:
         if p.is_file():
             return p
-    return BASE_DIR / "config.env"
+    return APP_DATA_DIR / "config.env"
 
 def load_config() -> dict:
     """Reads config.env or .env and returns a dictionary of settings."""
@@ -167,8 +170,9 @@ def load_config() -> dict:
     return cfg
 
 def save_config(cfg: dict):
-    """Persists settings to config.env or .env file."""
-    target_env = find_config_env_file()
+    """Persists settings to the persistent AppData config.env file."""
+    target_env = APP_DATA_DIR / "config.env"
+    target_env.parent.mkdir(parents=True, exist_ok=True)
     lines = [
         "# ===========================================================================",
         "# Autodesk PostgreSQL Connector Configuration File",
@@ -515,6 +519,18 @@ class TrayApp:
 # ---------------------------------------------------------------------------
 # Entry point
 # ---------------------------------------------------------------------------
+def ensure_single_instance():
+    """Prevents multiple instances of the tray app from running at once."""
+    mutex_name = "Global\\AutodeskPostgreSQLConnectorSingleInstance"
+    mutex = ctypes.windll.kernel32.CreateMutexW(None, False, mutex_name)
+    if mutex is None or ctypes.windll.kernel32.GetLastError() == 183:
+        return False
+    return True
+
+
 if __name__ == "__main__":
+    if not ensure_single_instance():
+        sys.exit(0)
+
     app = TrayApp()
     app.run()

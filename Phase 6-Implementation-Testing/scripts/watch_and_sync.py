@@ -44,6 +44,17 @@ from datetime import datetime
 
 logger = logging.getLogger(__name__)
 
+
+def normalize_output_sql_path(output_sql: str | None) -> str | None:
+    """Resolve relative SQL paths to a stable absolute path so subprocess and parent process read the same file."""
+    if not output_sql:
+        return output_sql
+    path = Path(output_sql)
+    if path.is_absolute():
+        return str(path)
+    return str((Path(__file__).resolve().parent / path).resolve())
+
+
 # Force UTF-8 encoding for Windows console to avoid charmap encoding errors
 if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
@@ -923,6 +934,7 @@ def run_conversion_and_apply(sqlite_path: str, output_sql: str, pg_host: str, pg
     4. Runs physical deletion detection (`detect_schema_differences`).
     5. Optionally syncs records (`sync_data`).
     """
+    output_sql = normalize_output_sql_path(output_sql)
     cmd = [
         sys.executable,
         os.path.join(os.path.dirname(__file__), "convert_autodesk_to_postgis.py"),
@@ -1264,7 +1276,7 @@ def watch_file(sqlite_path: str = None, search_dir: str = None, model_name: str 
     if sqlite_path and os.path.exists(sqlite_path):
         raw_name = Path(sqlite_path).stem
         target_db = pg_db or clean_postgres_db_name(raw_name)
-        out_sql = output_sql or f"schema_{target_db}.sql"
+        out_sql = normalize_output_sql_path(output_sql or f"schema_{target_db}.sql")
         initial_list = [{
             "path": sqlite_path,
             "model_name": raw_name,
@@ -1365,7 +1377,7 @@ def _watch_with_polling(sqlite_path, search_dir, model_name, output_sql,
             if sqlite_path and os.path.exists(sqlite_path):
                 raw_name = Path(sqlite_path).stem
                 target_db = pg_db or clean_postgres_db_name(raw_name)
-                out_sql = output_sql or f"schema_{target_db}.sql"
+                out_sql = normalize_output_sql_path(output_sql or f"schema_{target_db}.sql")
                 active_models = [{
                     "path": sqlite_path,
                     "model_name": raw_name,
@@ -1420,10 +1432,13 @@ def _watch_with_polling(sqlite_path, search_dir, model_name, output_sql,
 
 
 def find_config_env_file() -> str | None:
-    """Finds existing config.env or .env file in script dir, parent dir, or current working dir."""
+    """Finds a persistent config file in AppData first, then local fallback paths."""
     script_dir = Path(__file__).resolve().parent
     cwd = Path.cwd()
+    appdata_dir = Path(os.environ.get("APPDATA", Path.home())) / "AutodeskPostgreSQLConnector"
     candidates = [
+        appdata_dir / "config.env",
+        appdata_dir / ".env",
         script_dir / "config.env",
         script_dir / ".env",
         script_dir.parent / "config.env",
@@ -1434,7 +1449,7 @@ def find_config_env_file() -> str | None:
     for p in candidates:
         if p.is_file():
             return str(p)
-    return None
+    return str(appdata_dir / "config.env")
 
 
 def load_config_env(env_path: str = None) -> dict:
