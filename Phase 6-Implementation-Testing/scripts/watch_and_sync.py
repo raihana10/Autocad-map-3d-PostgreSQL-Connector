@@ -606,11 +606,13 @@ def sync_data(sqlite_path: str, pg_conn, default_srid: int = 2154):
         pg_conn: PostgreSQL connection.
         default_srid (int): Target PostGIS EPSG code.
     """
-    try:
-        from tqdm import tqdm
-        has_tqdm = True
-    except ImportError:
-        has_tqdm = False
+    has_tqdm = False
+    if sys.stderr is not None and getattr(sys.stderr, "write", None) is not None:
+        try:
+            from tqdm import tqdm
+            has_tqdm = True
+        except ImportError:
+            has_tqdm = False
 
     try:
         sq_conn = sqlite3.connect(sqlite_path)
