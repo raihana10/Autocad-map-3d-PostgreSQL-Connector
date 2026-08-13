@@ -12,12 +12,11 @@
 ; ===========================================================================
 
 [Setup]
-AppId={{B7F3A1C2-4E2D-4F1A-91C3-A2B3C4D5E6F7}
+AppId={{B7F3A1C2-4E2D-4F1A-91C3-A2B3C4D5E6F7}}
 AppName=Autodesk PostgreSQL Connector
 AppVersion=1.0.0
-AppPublisher=cec projekt GmbH
-AppPublisherURL=https://www.cec-projekt.de
-AppCopyright=Copyright (C) 2025
+AppPublisher=infranet engineering 
+AppCopyright=Copyright (C) 2026
 
 ; Installation directory (Program Files by default)
 DefaultDirName={autopf}\Autodesk PostgreSQL Connector
@@ -67,7 +66,7 @@ Root: HKCU; Subkey: "Software\Microsoft\Windows\CurrentVersion\Run"; ValueType: 
 
 [Tasks]
 Name: "desktopicon"; Description: "Create a &desktop shortcut"; GroupDescription: "Additional icons:"
-Name: "autostart";   Description: "Launch automatically at Windows startup"; GroupDescription: "Startup options:"; Flags: checked
+Name: "autostart";   Description: "Launch automatically at Windows startup"; GroupDescription: "Startup options:"; 
 
 [Run]
 ; Launch the application immediately after installation finishes
