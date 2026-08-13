@@ -59,11 +59,22 @@ def main():
         str(SCRIPTS_DIR / "gui_tray_app.py"),
     ]
 
+    exe_path = DIST_DIR / "AutodeskPostgreSQLConnector.exe"
+    DIST_DIR.mkdir(parents=True, exist_ok=True)
+
+    if exe_path.exists():
+        try:
+            exe_path.unlink()
+            print(f"Removed previous executable: {exe_path}")
+        except PermissionError:
+            print(f"Could not remove existing executable (it may be running): {exe_path}")
+            print("Please close the program and retry.")
+            sys.exit(1)
+
     print(f"\nRunning: {' '.join(cmd)}\n")
     result = subprocess.run(cmd, cwd=str(SCRIPTS_DIR))
 
     if result.returncode == 0:
-        exe_path = DIST_DIR / "AutodeskPostgreSQLConnector.exe"
         print("\n" + "=" * 65)
         print("  ✅ Build successful!")
         print(f"  Output: {exe_path}")
