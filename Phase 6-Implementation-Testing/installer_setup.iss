@@ -8,7 +8,7 @@
 ;   1. Install Inno Setup from https://jrsoftware.org/ispage.php (free)
 ;   2. Build the .exe first:  python scripts/build_exe.py
 ;   3. Open this file in Inno Setup Compiler and click Build > Compile
-;   4. Find the installer in:  installer_output/Setup_AutodeskPostgreSQLConnector.exe
+;   4. Find the installer in:  installer_output/Setup_PostMapLive.exe
 ; ===========================================================================
 
 [Setup]
@@ -28,7 +28,7 @@ PrivilegesRequiredOverridesAllowed=dialog
 
 ; Output installer file
 OutputDir=installer_output
-OutputBaseFilename=Setup_AutodeskPostgreSQLConnector
+OutputBaseFilename=Setup_PostMapLive
 
 ; Compression
 Compression=lzma2/ultra64
@@ -47,22 +47,22 @@ Name: "english"; MessagesFile: "compiler:Default.isl"
 
 [Files]
 ; Main executable (compiled by PyInstaller)
-Source: "dist\AutodeskPostgreSQLConnector.exe"; DestDir: "{app}"; Flags: ignoreversion
+Source: "dist\PostMapLive.exe"; DestDir: "{app}"; Flags: ignoreversion
 
 ; Optional: README / User Guide
 ; Source: "Phase 6-Implementation-Testing\06-testing-user-guide_EN.md"; DestDir: "{app}"; Flags: ignoreversion
 
 [Icons]
 ; Start Menu shortcut
-Name: "{group}\Autodesk PostgreSQL Connector";           Filename: "{app}\AutodeskPostgreSQLConnector.exe"
-Name: "{group}\Uninstall Autodesk PostgreSQL Connector"; Filename: "{uninstallexe}"
+Name: "{group}\PostMap Live";           Filename: "{app}\PostMapLive.exe"
+Name: "{group}\Uninstall PostMap Live"; Filename: "{uninstallexe}"
 
 ; Desktop shortcut (optional)
-Name: "{userdesktop}\Autodesk PostgreSQL Connector";     Filename: "{app}\AutodeskPostgreSQLConnector.exe"; Tasks: desktopicon
+Name: "{userdesktop}\PostMap Live";     Filename: "{app}\PostMapLive.exe"; Tasks: desktopicon
 
 [Registry]
 ; Auto-start at Windows logon via HKCU registry (reliable, no admin needed)
-Root: HKCU; Subkey: "Software\Microsoft\Windows\CurrentVersion\Run"; ValueType: string; ValueName: "AutodeskPostgreSQLConnector"; ValueData: """{app}\AutodeskPostgreSQLConnector.exe"""; Tasks: autostart; Flags: uninsdeletevalue
+Root: HKCU; Subkey: "Software\Microsoft\Windows\CurrentVersion\Run"; ValueType: string; ValueName: "PostMapLive"; ValueData: """{app}\PostMapLive.exe"""; Tasks: autostart; Flags: uninsdeletevalue
 
 [Tasks]
 Name: "desktopicon"; Description: "Create a &desktop shortcut"; GroupDescription: "Additional icons:"
@@ -70,11 +70,11 @@ Name: "autostart";   Description: "Launch automatically at Windows startup"; Gro
 
 [Run]
 ; Launch the application immediately after installation finishes
-Filename: "{app}\AutodeskPostgreSQLConnector.exe"; Description: "Launch Autodesk PostgreSQL Connector now"; Flags: nowait postinstall skipifsilent
+Filename: "{app}\PostMapLive.exe"; Description: "Launch PostMap Live now"; Flags: nowait postinstall skipifsilent
 
 [UninstallRun]
 ; Kill the process before uninstalling
-Filename: "taskkill"; Parameters: "/F /IM AutodeskPostgreSQLConnector.exe"; RunOnceId: "KillConnector"; Flags: runhidden
+Filename: "taskkill"; Parameters: "/F /IM PostMapLive.exe"; RunOnceId: "KillConnector"; Flags: runhidden
 
 [UninstallDelete]
 ; Clean up config and log files
@@ -83,4 +83,4 @@ Type: files; Name: "{app}\connector.log"
 
 [Messages]
 FinishedHeadingLabel=Installation complete!
-FinishedLabelNoIcons=The Autodesk PostgreSQL Connector has been installed and is now running in the system tray (near the clock). You can right-click the tray icon to configure your PostgreSQL connection.
+FinishedLabelNoIcons=PostMap Live has been installed and is now running in the system tray (near the clock). You can right-click the tray icon to configure your PostgreSQL connection.

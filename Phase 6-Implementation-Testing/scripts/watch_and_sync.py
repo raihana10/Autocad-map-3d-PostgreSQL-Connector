@@ -64,7 +64,7 @@ def normalize_output_sql_path(output_sql: str | None) -> str | None:
     if getattr(sys, "frozen", False):
         appdata_sql_dir = (
             Path(os.environ.get("APPDATA", Path.home()))
-            / "AutodeskPostgreSQLConnector"
+            / "PostMapLive"
             / "sql"
         )
         appdata_sql_dir.mkdir(parents=True, exist_ok=True)
@@ -1459,7 +1459,7 @@ def find_config_env_file() -> str | None:
     """Finds a persistent config file in AppData first, then local fallback paths."""
     script_dir = Path(__file__).resolve().parent
     cwd = Path.cwd()
-    appdata_dir = Path(os.environ.get("APPDATA", Path.home())) / "AutodeskPostgreSQLConnector"
+    appdata_dir = Path(os.environ.get("APPDATA", Path.home())) / "PostMapLive"
     candidates = [
         appdata_dir / "config.env",
         appdata_dir / ".env",
