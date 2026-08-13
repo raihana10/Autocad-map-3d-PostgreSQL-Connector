@@ -437,20 +437,26 @@ class TrayApp:
             img_path = assets_dir / filename
             if img_path.is_file():
                 try:
-                    img = Image.open(img_path).convert("RGBA")
-                    return img.resize((128, 128), Image.Resampling.LANCZOS)
+                    from PIL import Image as _Img
+                    src = Image.open(img_path).convert("RGBA")
+                    # Redimensionne le glyphe pour qu'il n'occupe que ~75% du canvas
+                    inner_size = 24  # 32 * 0.75
+                    src = src.resize((inner_size, inner_size), Image.Resampling.LANCZOS)
+                    canvas = _Img.new("RGBA", (32, 32), (0, 0, 0, 0))
+                    offset = ((32 - inner_size) // 2, (32 - inner_size) // 2)
+                    canvas.paste(src, offset, src)
+                    return canvas
                 except Exception as exc:
                     logger.warning(f"Could not load icon {img_path}: {exc}")
 
         # Fallback if image file is not found
         try:
-            img = Image.new("RGBA", (128, 128), color=(0, 0, 0, 0))
+            img = Image.new("RGBA", (32, 32), color=(0, 0, 0, 0))
             draw = ImageDraw.Draw(img)
-            draw.ellipse([12, 12, 116, 116], fill=color, outline="white", width=6)
-            draw.text((40, 46), "DB", fill="white", font=None)
+            draw.ellipse([2, 2, 30, 30], fill=color, outline="white", width=2)
             return img
         except Exception:
-            return Image.new("RGBA", (128, 128), color=color)
+            return Image.new("RGBA", (32, 32), color=color)
 
     def _build_menu(self):
         import pystray
