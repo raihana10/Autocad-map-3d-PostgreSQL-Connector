@@ -35,15 +35,19 @@ def main():
     print("  Building AutodeskPostgreSQLConnector.exe with PyInstaller")
     print("=" * 65)
 
+    ASSETS_DIR  = SCRIPTS_DIR.parent / "assets"
+    
     cmd = [
         sys.executable, "-m", "PyInstaller",
         "--onefile",                                # Single .exe
         "--noconsole",                              # No terminal window (GUI mode)
         "--name", "AutodeskPostgreSQLConnector",
+        "--icon", str(ASSETS_DIR / "app_logo.ico"), # App logo for .exe
         "--distpath", str(DIST_DIR),
         "--workpath", str(BUILD_DIR),
         "--add-data", f"{SCRIPTS_DIR / 'watch_and_sync.py'};.",
         "--add-data", f"{SCRIPTS_DIR / 'convert_autodesk_to_postgis.py'};.",
+        "--add-data", f"{ASSETS_DIR};assets",
         # Hidden imports needed at runtime
         "--hidden-import", "pystray",
         "--hidden-import", "PIL",

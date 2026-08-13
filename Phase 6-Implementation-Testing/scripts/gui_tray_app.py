@@ -401,7 +401,7 @@ class TrayApp:
         # Hidden tkinter root (never shown directly — keeps event loop alive)
         self.root = tk.Tk()
         self.root.withdraw()
-        self.root.title("Autodesk PostgreSQL Connector")
+        self.root.title("PostMap Live")
 
         self._icon = None
         self._paused = False
@@ -409,17 +409,47 @@ class TrayApp:
     # ---- Tray icon helpers -------------------------------------------------
 
     def _make_icon_image(self, color: str = "#007ACC"):
-        """Generates a simple colored square as the tray icon."""
+        """Loads custom PNG icon image depending on current state, with fallback."""
+        from PIL import Image
+
+        # Search locations for assets directory (local dev vs PyInstaller bundle)
+        assets_candidates = [
+            BASE_DIR / "assets",
+            BASE_DIR.parent / "assets",
+            Path(getattr(sys, "_MEIPASS", BASE_DIR)) / "assets",
+            Path.cwd() / "assets",
+        ]
+
+        assets_dir = None
+        for cand in assets_candidates:
+            if cand.is_dir():
+                assets_dir = cand
+                break
+
+        if self._paused:
+            filename = "icon_paused.png"
+        elif self.engine.is_running():
+            filename = "icon_running.png"
+        else:
+            filename = "icon_stopped.png"
+
+        if assets_dir:
+            img_path = assets_dir / filename
+            if img_path.is_file():
+                try:
+                    return Image.open(img_path)
+                except Exception as exc:
+                    logger.warning(f"Could not load icon {img_path}: {exc}")
+
+        # Fallback if image file is not found
         try:
-            from PIL import Image, ImageDraw
+            from PIL import ImageDraw
             img = Image.new("RGBA", (64, 64), color=(0, 0, 0, 0))
             draw = ImageDraw.Draw(img)
             draw.ellipse([6, 6, 58, 58], fill=color, outline="white", width=2)
             draw.text((18, 18), "DB", fill="white")
             return img
-        except ImportError:
-            # Fallback: plain blue square
-            from PIL import Image
+        except Exception:
             return Image.new("RGBA", (64, 64), color=color)
 
     def _build_menu(self):
@@ -447,6 +477,7 @@ class TrayApp:
             color = "#DC3545"    # Red    = stopped
         self._icon.icon = self._make_icon_image(color)
         self._icon.menu = self._build_menu()
+
 
     # ---- Actions called from tray menu (may be on pystray thread) ----------
 

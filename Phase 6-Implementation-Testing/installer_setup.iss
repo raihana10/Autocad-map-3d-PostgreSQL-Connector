@@ -13,14 +13,14 @@
 
 [Setup]
 AppId={{B7F3A1C2-4E2D-4F1A-91C3-A2B3C4D5E6F7}}
-AppName=Autodesk PostgreSQL Connector
+AppName=PostMap Live
 AppVersion=1.0.0
 AppPublisher=infranet engineering 
 AppCopyright=Copyright (C) 2026
 
 ; Installation directory (Program Files by default)
-DefaultDirName={autopf}\Autodesk PostgreSQL Connector
-DefaultGroupName=Autodesk PostgreSQL Connector
+DefaultDirName={autopf}\PostMap Live
+DefaultGroupName=PostMap Live
 
 ; No admin required — tray app runs in user context
 PrivilegesRequired=lowest
@@ -37,7 +37,7 @@ InternalCompressLevel=ultra64
 
 ; Installer appearance
 WizardStyle=modern
-SetupIconFile=
+SetupIconFile=assets\app_logo.ico
 
 ; Minimum Windows version: Windows 10
 MinVersion=10.0
