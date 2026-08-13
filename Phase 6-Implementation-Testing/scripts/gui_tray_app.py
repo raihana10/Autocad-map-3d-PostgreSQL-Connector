@@ -437,15 +437,8 @@ class TrayApp:
             img_path = assets_dir / filename
             if img_path.is_file():
                 try:
-                    from PIL import Image as _Img
-                    src = Image.open(img_path).convert("RGBA")
-                    # Redimensionne le glyphe pour qu'il n'occupe que ~75% du canvas
-                    inner_size = 24  # 32 * 0.75
-                    src = src.resize((inner_size, inner_size), Image.Resampling.LANCZOS)
-                    canvas = _Img.new("RGBA", (32, 32), (0, 0, 0, 0))
-                    offset = ((32 - inner_size) // 2, (32 - inner_size) // 2)
-                    canvas.paste(src, offset, src)
-                    return canvas
+                    img = Image.open(img_path).convert("RGBA")
+                    return img.resize((32, 32), Image.Resampling.LANCZOS)
                 except Exception as exc:
                     logger.warning(f"Could not load icon {img_path}: {exc}")
 
