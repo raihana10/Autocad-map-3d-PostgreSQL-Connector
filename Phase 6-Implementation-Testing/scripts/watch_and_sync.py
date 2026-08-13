@@ -950,143 +950,143 @@ def run_conversion_and_apply(sqlite_path: str, output_sql: str, pg_host: str, pg
                              sync_data_flag: bool = False):
     """
     Main orchestration step:
-    1. Invokes `convert_autodesk_to_postgis.py` via subprocess to build DDL SQL.
+    1. Calls generate_postgis_ddl() directly in-process (no subprocess) to build DDL SQL.
+       NOTE: Subprocess was removed — when frozen with PyInstaller --onefile, sys.executable
+       is the .exe itself. Calling it with a script path re-runs TrayApp instead of the
+       converter, writing nothing to disk. Direct import works in both dev + packaged modes.
     2. Connects to PostgreSQL via psycopg2 and executes DDL statements safely.
     3. Runs dynamic column synchronization (`sync_table_columns`).
     4. Runs physical deletion detection (`detect_schema_differences`).
     5. Optionally syncs records (`sync_data`).
     """
     output_sql = normalize_output_sql_path(output_sql)
-    cmd = [
-        sys.executable,
-        os.path.join(os.path.dirname(__file__), "convert_autodesk_to_postgis.py"),
-        "--db", sqlite_path,
-        "--out", output_sql,
-        "--srid", str(srid)
-    ]
 
-    env = os.environ.copy()
-    env["PYTHONIOENCODING"] = "utf-8"
-    result = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace", env=env)
-
-    if result.returncode == 0:
+    # -------------------------------------------------------------------------
+    # Step 1: DDL conversion (in-process — works in both dev and frozen modes)
+    # -------------------------------------------------------------------------
+    try:
+        from convert_autodesk_to_postgis import generate_postgis_ddl
+        ddl_result = generate_postgis_ddl(sqlite_path, default_srid=srid)
+        Path(output_sql).parent.mkdir(parents=True, exist_ok=True)
+        Path(output_sql).write_text(ddl_result, encoding="utf-8")
         logger.info("DDL conversion successful -> %s", output_sql)
+    except Exception as exc:
+        logger.error("DDL conversion failed for '%s': %s", sqlite_path, exc, exc_info=True)
+        return
 
-        if pg_user and pg_pass:
-            try:
-                import psycopg2
+    if pg_user and pg_pass:
+        try:
+            import psycopg2
 
-                ensure_pg_database_exists(host=pg_host, port=pg_port, user=pg_user, password=pg_pass, dbname=pg_db)
+            ensure_pg_database_exists(host=pg_host, port=pg_port, user=pg_user, password=pg_pass, dbname=pg_db)
 
-                logger.info("Applying DDL to database '%s' (%s:%s)...", pg_db, pg_host, pg_port)
-                conn = psycopg2.connect(host=pg_host, port=pg_port, user=pg_user, password=pg_pass, dbname=pg_db)
-                conn.autocommit = True
-                cursor = conn.cursor()
-                sql_content = Path(output_sql).read_text(encoding="utf-8")
+            logger.info("Applying DDL to database '%s' (%s:%s)...", pg_db, pg_host, pg_port)
+            conn = psycopg2.connect(host=pg_host, port=pg_port, user=pg_user, password=pg_pass, dbname=pg_db)
+            conn.autocommit = True
+            cursor = conn.cursor()
+            sql_content = Path(output_sql).read_text(encoding="utf-8")
 
-                success_count = 0
-                created_tables = []
-                created_domains = []
-                created_indexes = []
-                created_fks = 0
-                created_triggers = []
-                failed_statements = []
+            success_count = 0
+            created_tables = []
+            created_domains = []
+            created_indexes = []
+            created_fks = 0
+            created_triggers = []
+            failed_statements = []
 
-                logger.info("Schema application starting...")
+            logger.info("Schema application starting...")
 
-                existing_pg_tables = get_existing_tables(cursor)
-                existing_pg_indexes = get_existing_indexes(cursor)
-                existing_pg_triggers = get_existing_triggers(cursor)
+            existing_pg_tables = get_existing_tables(cursor)
+            existing_pg_indexes = get_existing_indexes(cursor)
+            existing_pg_triggers = get_existing_triggers(cursor)
 
-                statements = split_sql_statements(sql_content)
+            statements = split_sql_statements(sql_content)
 
-                for stmt in statements:
-                    stmt_clean = stmt.strip()
-                    if not stmt_clean or stmt_clean.startswith("--"):
-                        continue
+            for stmt in statements:
+                stmt_clean = stmt.strip()
+                if not stmt_clean or stmt_clean.startswith("--"):
+                    continue
 
-                    stmt_upper = stmt_clean.upper()
-                    try:
-                        cursor.execute(stmt_clean)
-                        success_count += 1
+                stmt_upper = stmt_clean.upper()
+                try:
+                    cursor.execute(stmt_clean)
+                    success_count += 1
 
-                        if "CREATE TABLE" in stmt_upper:
-                            parts = stmt_clean.split('"')
-                            tname = parts[1] if len(parts) > 1 else "Table"
-                            tname_upper = tname.upper()
-                            if tname_upper not in existing_pg_tables:
-                                existing_pg_tables.add(tname_upper)
-                                if tname.endswith("_TBD") or tname == "TB_DOMAIN":
-                                    created_domains.append(tname)
-                                    logger.info("Domain table '%s' created", tname)
-                                else:
-                                    created_tables.append(tname)
-                                    logger.info("Feature class '%s' created", tname)
-                        elif "CREATE INDEX" in stmt_upper:
-                            parts = stmt_clean.split('"')
-                            idx_name = parts[1] if len(parts) > 1 else "Index"
-                            idx_upper = idx_name.upper()
-                            if idx_upper not in existing_pg_indexes:
-                                existing_pg_indexes.add(idx_upper)
-                                created_indexes.append(idx_name)
-                                logger.info("Spatial index '%s' created", idx_name)
-                        elif "FOREIGN KEY" in stmt_upper:
-                            created_fks += 1
-                        elif "CREATE TRIGGER" in stmt_upper:
-                            parts = stmt_clean.split('"')
-                            trg_name = parts[1] if len(parts) > 1 else "Trigger"
-                            trg_upper = trg_name.upper()
-                            if trg_upper not in existing_pg_triggers:
-                                existing_pg_triggers.add(trg_upper)
-                                created_triggers.append(trg_name)
-                                logger.info("Trigger '%s' activated", trg_name)
-                    except Exception as ex:
-                        conn.rollback()
-                        first_line = stmt_clean.splitlines()[0][:120]
-                        failed_statements.append((first_line, str(ex)))
-                        logger.error("SQL Error: %s -> %s", first_line, ex)
+                    if "CREATE TABLE" in stmt_upper:
+                        parts = stmt_clean.split('"')
+                        tname = parts[1] if len(parts) > 1 else "Table"
+                        tname_upper = tname.upper()
+                        if tname_upper not in existing_pg_tables:
+                            existing_pg_tables.add(tname_upper)
+                            if tname.endswith("_TBD") or tname == "TB_DOMAIN":
+                                created_domains.append(tname)
+                                logger.info("Domain table '%s' created", tname)
+                            else:
+                                created_tables.append(tname)
+                                logger.info("Feature class '%s' created", tname)
+                    elif "CREATE INDEX" in stmt_upper:
+                        parts = stmt_clean.split('"')
+                        idx_name = parts[1] if len(parts) > 1 else "Index"
+                        idx_upper = idx_name.upper()
+                        if idx_upper not in existing_pg_indexes:
+                            existing_pg_indexes.add(idx_upper)
+                            created_indexes.append(idx_name)
+                            logger.info("Spatial index '%s' created", idx_name)
+                    elif "FOREIGN KEY" in stmt_upper:
+                        created_fks += 1
+                    elif "CREATE TRIGGER" in stmt_upper:
+                        parts = stmt_clean.split('"')
+                        trg_name = parts[1] if len(parts) > 1 else "Trigger"
+                        trg_upper = trg_name.upper()
+                        if trg_upper not in existing_pg_triggers:
+                            existing_pg_triggers.add(trg_upper)
+                            created_triggers.append(trg_name)
+                            logger.info("Trigger '%s' activated", trg_name)
+                except Exception as ex:
+                    conn.rollback()
+                    first_line = stmt_clean.splitlines()[0][:120]
+                    failed_statements.append((first_line, str(ex)))
+                    logger.error("SQL Error: %s -> %s", first_line, ex)
 
-                # Ensure all PK columns have sequences attached (upgrades pre-existing tables)
-                logger.info("Ensuring primary key sequences on all tables...")
-                ensure_pk_sequences(conn)
+            # Ensure all PK columns have sequences attached (upgrades pre-existing tables)
+            logger.info("Ensuring primary key sequences on all tables...")
+            ensure_pk_sequences(conn)
 
-                # Column addition sync
-                logger.info("Starting attribute synchronization...")
-                sync_table_columns(sqlite_path, conn, srid)
+            # Column addition sync
+            logger.info("Starting attribute synchronization...")
+            sync_table_columns(sqlite_path, conn, srid)
 
-                # Deletion sync (dropped tables & dropped columns)
-                logger.info("Detecting schema differences and applying deletions...")
-                detect_schema_differences(sqlite_path, conn)
+            # Deletion sync (dropped tables & dropped columns)
+            logger.info("Detecting schema differences and applying deletions...")
+            detect_schema_differences(sqlite_path, conn)
 
-                # Data record sync (upsert)
-                if sync_data_flag:
-                    logger.info("Starting data synchronization (upsert)...")
-                    sync_data(sqlite_path, conn, srid)
+            # Data record sync (upsert)
+            if sync_data_flag:
+                logger.info("Starting data synchronization (upsert)...")
+                sync_data(sqlite_path, conn, srid)
 
-                cursor.close()
-                conn.close()
+            cursor.close()
+            conn.close()
 
-                # Execution Summary
-                logger.info("=== SYNCHRONIZATION SUMMARY ===")
-                logger.info("Feature Classes: %d table(s) %s", len(created_tables),
-                            f"-> {', '.join(created_tables)}" if created_tables else "")
-                logger.info("Domain Tables:   %d table(s) %s", len(created_domains),
-                            f"-> {', '.join(created_domains)}" if created_domains else "")
-                logger.info("Spatial Indexes: %d, FK: %d, Triggers: %d",
-                            len(created_indexes), created_fks, len(created_triggers))
-                if failed_statements:
-                    logger.warning("Partial sync: %d successful, %d failed", success_count, len(failed_statements))
-                else:
-                    logger.info("PostgreSQL synchronization 100%% successful (%d SQL queries)", success_count)
+            # Execution Summary
+            logger.info("=== SYNCHRONIZATION SUMMARY ===")
+            logger.info("Feature Classes: %d table(s) %s", len(created_tables),
+                        f"-> {', '.join(created_tables)}" if created_tables else "")
+            logger.info("Domain Tables:   %d table(s) %s", len(created_domains),
+                        f"-> {', '.join(created_domains)}" if created_domains else "")
+            logger.info("Spatial Indexes: %d, FK: %d, Triggers: %d",
+                        len(created_indexes), created_fks, len(created_triggers))
+            if failed_statements:
+                logger.warning("Partial sync: %d successful, %d failed", success_count, len(failed_statements))
+            else:
+                logger.info("PostgreSQL synchronization 100%% successful (%d SQL queries)", success_count)
 
-            except ImportError:
-                logger.warning("Module 'psycopg2' not installed. Install with: pip install psycopg2-binary")
-            except Exception as e:
-                logger.error("Error while applying to PostgreSQL: %s", e, exc_info=True)
-        else:
-            logger.info("No PostgreSQL credentials provided. Only the SQL file was generated.")
+        except ImportError:
+            logger.warning("Module 'psycopg2' not installed. Install with: pip install psycopg2-binary")
+        except Exception as e:
+            logger.error("Error while applying to PostgreSQL: %s", e, exc_info=True)
     else:
-        logger.error("DDL conversion failed: %s", result.stderr)
+        logger.info("No PostgreSQL credentials provided. Only the SQL file was generated.")
 
 
 # =============================================================================
