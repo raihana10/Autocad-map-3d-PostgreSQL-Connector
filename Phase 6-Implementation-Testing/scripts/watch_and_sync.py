@@ -46,13 +46,35 @@ logger = logging.getLogger(__name__)
 
 
 def normalize_output_sql_path(output_sql: str | None) -> str | None:
-    """Resolve relative SQL paths to a stable absolute path so subprocess and parent process read the same file."""
+    """
+    Resolve SQL output paths to a stable, writable location.
+
+    IMPORTANT - PyInstaller onefile issue:
+      When frozen, each invocation of sys.executable (including subprocesses)
+      extracts to a DIFFERENT _MEI* temp folder. Writing SQL to __file__'s
+      parent (_MEI124282) means the subprocess writes to _MEI124283 and the
+      parent cannot read it. Fix: always redirect to APPDATA when frozen.
+    """
     if not output_sql:
         return output_sql
+
     path = Path(output_sql)
+
+    # When running as PyInstaller frozen app, route all SQL output to APPDATA
+    if getattr(sys, "frozen", False):
+        appdata_sql_dir = (
+            Path(os.environ.get("APPDATA", Path.home()))
+            / "AutodeskPostgreSQLConnector"
+            / "sql"
+        )
+        appdata_sql_dir.mkdir(parents=True, exist_ok=True)
+        return str(appdata_sql_dir / path.name)
+
+    # Development mode: keep original relative-to-script behavior
     if path.is_absolute():
         return str(path)
     return str((Path(__file__).resolve().parent / path).resolve())
+
 
 
 # Force UTF-8 encoding for Windows console to avoid charmap encoding errors
