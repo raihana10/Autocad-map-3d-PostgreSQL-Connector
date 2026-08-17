@@ -459,12 +459,10 @@ class TrayApp:
             items.append(pystray.MenuItem("Status: 🟢 Active", None, enabled=False))
             items.append(pystray.Menu.SEPARATOR)
             items.append(pystray.MenuItem("⏸ Pause Sync",  lambda icon, item: self._pause_service()))
-            items.append(pystray.MenuItem("⏹ Stop Service", lambda icon, item: self._stop_service()))
         elif self._paused:
             items.append(pystray.MenuItem("Status: 🟧 Paused", None, enabled=False))
             items.append(pystray.Menu.SEPARATOR)
             items.append(pystray.MenuItem("▶ Resume Sync", lambda icon, item: self._start_service()))
-            items.append(pystray.MenuItem("⏹ Stop Service", lambda icon, item: self._stop_service()))
         else:
             items.append(pystray.MenuItem("Status: 🔴 Stopped", None, enabled=False))
             items.append(pystray.Menu.SEPARATOR)
@@ -512,6 +510,7 @@ class TrayApp:
         self._update_icon_color()
 
     def _stop_service(self):
+        # A true Stopped state must use the stopped/red tray icon, not the paused/orange one.
         self._paused = False
         self.engine.stop()
         logger.info("Sync service stopped by user.")

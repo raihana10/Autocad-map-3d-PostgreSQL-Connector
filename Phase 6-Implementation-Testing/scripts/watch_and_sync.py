@@ -264,22 +264,12 @@ _ANALYZED_SQLITES = {}
 
 def has_associated_dwg(sqlite_path: str, extra_search_dirs: list = None) -> bool:
     """
-    Checks if a SQLite database file has an associated AutoCAD Drawing (.dwg or .bak)
-    file with the same base filename stem.
+    Checks whether a SQLite file is a drawing-side copy associated with an AutoCAD .dwg/.bak
+    file using the same logical drawing name, even when the user customizes the filename.
 
-    A Drawing-side SQLite instance is created by AutoCAD Map 3D when a drawing is opened
-    or created from an Industry Model template. It shares the base filename stem with
-    the drawing (e.g. `Drawing6.sqlite` <-> `Drawing6.dwg` or `Drawing6.bak`).
-
-    Master Industry Models created in Infrastructure Administrator do NOT have associated
-    .dwg files with the same name.
-
-    Args:
-        sqlite_path (str): Path to candidate SQLite database file.
-        extra_search_dirs (list, optional): Additional directories to search for matching .dwg files.
-
-    Returns:
-        bool: True if an associated .dwg or .bak drawing file is found, False otherwise.
+    The detection is intentionally conservative: it matches same-stem files plus a normalized
+    comparison that strips separators and accents so a name like "Plan de chantier.sqlite"
+    matches "Plan de chantier.dwg" or "Plan_de_chantier.dwg".
     """
     try:
         sqlite_file = Path(sqlite_path)
@@ -287,39 +277,77 @@ def has_associated_dwg(sqlite_path: str, extra_search_dirs: list = None) -> bool
         if not stem:
             return False
 
-        search_dirs = [sqlite_file.parent]
+        import re
+        import unicodedata
 
-        # Add configured search directories from environment variable
-        dwg_dirs_env = os.environ.get("DWG_SEARCH_DIRS", "")
-        if dwg_dirs_env:
-            for d in dwg_dirs_env.split(";"):
-                d_str = d.strip()
-                if d_str and Path(d_str).is_dir():
-                    search_dirs.append(Path(d_str))
+        def normalize_name(value: str) -> str:
+            value = unicodedata.normalize("NFKD", value)
+            value = value.encode("ascii", "ignore").decode("ascii")
+            value = value.casefold().strip()
+            value = re.sub(r"[\s_\-.]+", "", value)
+            return value
+
+        def stem_variants(value: str):
+            variants = {normalize_name(value)}
+            base = value.strip()
+            if "_" in base:
+                prefix = base.rsplit("_", 1)[0]
+                variants.add(normalize_name(prefix))
+                if len(base.rsplit("_", 1)[1]) in (4, 5, 6, 8):
+                    variants.add(normalize_name(prefix))
+            if "-" in base:
+                prefix = base.rsplit("-", 1)[0]
+                variants.add(normalize_name(prefix))
+            return {v for v in variants if v}
+
+        target_variants = stem_variants(stem)
+        if not target_variants:
+            return False
+
+        search_roots = []
+        seen_roots = set()
+
+        for p in [sqlite_file.parent, *([Path(d) for d in (os.environ.get("DWG_SEARCH_DIRS", "").split(";") if os.environ.get("DWG_SEARCH_DIRS") else []) if d])]:
+            if not p:
+                continue
+            try:
+                p = Path(p).resolve()
+            except Exception:
+                p = Path(p)
+            if p.exists() and p.is_dir() and str(p) not in seen_roots:
+                search_roots.append(p)
+                seen_roots.add(str(p))
 
         if extra_search_dirs:
             for d in extra_search_dirs:
-                if d and Path(d).is_dir():
-                    search_dirs.append(Path(d))
+                if not d:
+                    continue
+                p = Path(d)
+                try:
+                    p = p.resolve()
+                except Exception:
+                    pass
+                if p.exists() and p.is_dir() and str(p) not in seen_roots:
+                    search_roots.append(p)
+                    seen_roots.add(str(p))
 
-        for sdir in search_dirs:
-            for ext in [".dwg", ".bak"]:
-                target_file = sdir / f"{stem}{ext}"
-                if target_file.exists():
+        if not search_roots:
+            return False
+
+        for root in search_roots:
+            for candidate in root.rglob("*"):
+                if not candidate.is_file():
+                    continue
+                if candidate.suffix.lower() not in {".dwg", ".bak", ".dxf"}:
+                    continue
+                cand_variants = stem_variants(candidate.stem)
+                if cand_variants & target_variants:
                     logger.info(
-                        "Associated drawing file found: '%s' matching '%s'",
-                        target_file.name, sqlite_file.name
+                        "Associated drawing file found globally: '%s' matching '%s'",
+                        candidate.name, sqlite_file.name
                     )
                     return True
 
-                # Case-insensitive fallback check
-                for candidate in sdir.glob(f"{stem}.*"):
-                    if candidate.suffix.lower() in [".dwg", ".bak"]:
-                        logger.info(
-                            "Associated drawing file found: '%s' matching '%s'",
-                            candidate.name, sqlite_file.name
-                        )
-                        return True
     except Exception as e:
         logger.warning("Error checking associated DWG for '%s': %s", sqlite_path, e)
 

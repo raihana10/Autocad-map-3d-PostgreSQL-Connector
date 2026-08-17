@@ -70,6 +70,38 @@ def test_is_autodesk_sqlite_rejects_drawing_instance(tmp_path):
     assert is_autodesk_sqlite(str(sqlite_file), check_dwg_association=False) is True
 
 
+def test_is_autodesk_sqlite_rejects_custom_named_drawing_with_matching_dwg(tmp_path):
+    """A personalized drawing copy must still be rejected when a matching .dwg is present."""
+    sqlite_file = tmp_path / "Plan de chantier.sqlite"
+    dwg_file = tmp_path / "Plan de chantier.dwg"
+    dwg_file.write_bytes(b"dummy dwg")
+
+    conn = sqlite3.connect(str(sqlite_file))
+    cur = conn.cursor()
+    cur.execute("CREATE TABLE TB_DICTIONARY (F_CLASS_ID INT, F_CLASS_NAME TEXT);")
+    cur.execute("INSERT INTO TB_DICTIONARY VALUES (1, 'TEST');")
+    conn.commit()
+    conn.close()
+
+    assert is_autodesk_sqlite(str(sqlite_file), check_dwg_association=True) is False
+
+
+def test_is_autodesk_sqlite_rejects_autocad_suffixed_drawing(tmp_path):
+    """An AutoCAD-generated suffixed drawing name like 'Plan_29d910.sqlite' must still match 'Plan.dwg'."""
+    sqlite_file = tmp_path / "Plan_29d910.sqlite"
+    dwg_file = tmp_path / "Plan.dwg"
+    dwg_file.write_bytes(b"dummy dwg")
+
+    conn = sqlite3.connect(str(sqlite_file))
+    cur = conn.cursor()
+    cur.execute("CREATE TABLE TB_DICTIONARY (F_CLASS_ID INT, F_CLASS_NAME TEXT);")
+    cur.execute("INSERT INTO TB_DICTIONARY VALUES (1, 'TEST');")
+    conn.commit()
+    conn.close()
+
+    assert is_autodesk_sqlite(str(sqlite_file), check_dwg_association=True) is False
+
+
 def test_is_not_autodesk_sqlite(tmp_path):
     """Test rejection of non-Autodesk file."""
     non_autodesk = tmp_path / "regular.sqlite"
