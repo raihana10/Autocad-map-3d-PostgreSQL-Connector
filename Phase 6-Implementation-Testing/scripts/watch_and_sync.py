@@ -262,14 +262,114 @@ _SQLITE_MAGIC = b"SQLite format 3\x00"
 _ANALYZED_SQLITES = {}
 
 
+## System-wide DWG index cache: (last_scan_time, set_of_normalized_stems)
+_GLOBAL_DWG_INDEX = (0, set())
+_DWG_INDEX_TTL = 30.0  # seconds
+
+
+def _get_global_dwg_stems() -> set:
+    """
+    Scans targeted drawing locations (user profile folders, monitor zones, and custom search paths)
+    for all .dwg, .bak, and .dxf drawing files, returning a normalized set of drawing stems.
+
+    By default, search is restricted to user document locations for maximum performance.
+    Full drive-wide scanning (C:\\, D:\\...) can be enabled by setting ENABLE_FULL_SYSTEM_DWG_SCAN=1.
+
+    Cached for 30 seconds to optimize polling performance.
+    """
+    global _GLOBAL_DWG_INDEX
+    last_time, cached_stems = _GLOBAL_DWG_INDEX
+    now = time.time()
+    if cached_stems and (now - last_time) < _DWG_INDEX_TTL:
+        return cached_stems
+
+    import unicodedata
+    import re
+    import string
+
+    def normalize_name(value: str) -> str:
+        value = unicodedata.normalize("NFKD", value)
+        value = value.encode("ascii", "ignore").decode("ascii")
+        value = value.casefold().strip()
+        value = re.sub(r"[\s_\-.]+", "", value)
+        return value
+
+    stems = set()
+    search_roots = []
+    seen_roots = set()
+
+    # Standard user profile locations
+    home = Path.home()
+    user_dirs = [
+        home / "Documents",
+        home / "OneDrive" / "Documents",
+        home / "Desktop",
+        home / "OneDrive" / "Desktop",
+        home / "Downloads",
+    ]
+    for d in user_dirs:
+        if d.exists() and d.is_dir() and str(d) not in seen_roots:
+            search_roots.append(d)
+            seen_roots.add(str(d))
+
+    # Configured monitor zone and search directories
+    monitor_dir = os.environ.get("MONITOR_DIR")
+    if monitor_dir and Path(monitor_dir).exists():
+        p = Path(monitor_dir).resolve()
+        if str(p) not in seen_roots:
+            search_roots.append(p)
+            seen_roots.add(str(p))
+
+    if os.environ.get("DWG_SEARCH_DIRS"):
+        for d in os.environ.get("DWG_SEARCH_DIRS").split(";"):
+            if d:
+                try:
+                    p = Path(d).resolve()
+                    if p.exists() and p.is_dir() and str(p) not in seen_roots:
+                        search_roots.append(p)
+                        seen_roots.add(str(p))
+                except Exception:
+                    pass
+
+    # Optional full drive scan (only if explicitly enabled via environment variable)
+    if os.environ.get("ENABLE_FULL_SYSTEM_DWG_SCAN") == "1" and sys.platform == "win32":
+        logger.info("ENABLE_FULL_SYSTEM_DWG_SCAN=1 enabled: Scanning drive roots for DWG files...")
+        for letter in string.ascii_uppercase:
+            drive = Path(f"{letter}:\\")
+            if drive.exists() and str(drive) not in seen_roots:
+                search_roots.append(drive)
+                seen_roots.add(str(drive))
+
+    skip_dirs = {
+        "windows", "program files", "program files (x86)", ".git",
+        "node_modules", "$recycle.bin", "system volume information", ".gemini", "appdata"
+    }
+
+    for root in search_roots:
+        try:
+            for dirpath, dirs, filenames in os.walk(root):
+                # Prune skipped directories in-place to prevent os.walk from descending into them
+                dirs[:] = [d for d in dirs if d.lower() not in skip_dirs and not d.startswith(".")]
+
+                for fname in filenames:
+                    ext = os.path.splitext(fname)[1].lower()
+                    if ext in [".dwg", ".bak", ".dxf"]:
+                        stem = os.path.splitext(fname)[0]
+                        norm = normalize_name(stem)
+                        if norm:
+                            stems.add(norm)
+        except Exception as e:
+            logger.debug("Error indexing DWG root '%s': %s", root, e)
+
+    logger.debug("DWG index built: %d drawing stem(s) registered", len(stems))
+    _GLOBAL_DWG_INDEX = (now, stems)
+    return stems
+
+
 def has_associated_dwg(sqlite_path: str, extra_search_dirs: list = None) -> bool:
     """
-    Checks whether a SQLite file is a drawing-side copy associated with an AutoCAD .dwg/.bak
-    file using the same logical drawing name, even when the user customizes the filename.
-
-    The detection is intentionally conservative: it matches same-stem files plus a normalized
-    comparison that strips separators and accents so a name like "Plan de chantier.sqlite"
-    matches "Plan de chantier.dwg" or "Plan_de_chantier.dwg".
+    Checks whether a SQLite file is a drawing-side copy associated with an AutoCAD .dwg/.bak/.dxf file.
+    Uses strict exact stem matching first to avoid false positives on Master Industry Models.
     """
     try:
         sqlite_file = Path(sqlite_path)
@@ -287,66 +387,61 @@ def has_associated_dwg(sqlite_path: str, extra_search_dirs: list = None) -> bool
             value = re.sub(r"[\s_\-.]+", "", value)
             return value
 
-        def stem_variants(value: str):
-            variants = {normalize_name(value)}
-            base = value.strip()
-            if "_" in base:
-                prefix = base.rsplit("_", 1)[0]
-                variants.add(normalize_name(prefix))
-                if len(base.rsplit("_", 1)[1]) in (4, 5, 6, 8):
-                    variants.add(normalize_name(prefix))
-            if "-" in base:
-                prefix = base.rsplit("-", 1)[0]
-                variants.add(normalize_name(prefix))
-            return {v for v in variants if v}
-
-        target_variants = stem_variants(stem)
-        if not target_variants:
+        norm_sqlite_stem = normalize_name(stem)
+        if not norm_sqlite_stem:
             return False
 
-        search_roots = []
-        seen_roots = set()
-
-        for p in [sqlite_file.parent, *([Path(d) for d in (os.environ.get("DWG_SEARCH_DIRS", "").split(";") if os.environ.get("DWG_SEARCH_DIRS") else []) if d])]:
-            if not p:
-                continue
-            try:
-                p = Path(p).resolve()
-            except Exception:
-                p = Path(p)
-            if p.exists() and p.is_dir() and str(p) not in seen_roots:
-                search_roots.append(p)
-                seen_roots.add(str(p))
-
+        # 1. Check local folder first (exact stem match in sqlite_file.parent and extra_search_dirs)
+        local_dirs = [sqlite_file.parent]
         if extra_search_dirs:
             for d in extra_search_dirs:
-                if not d:
-                    continue
-                p = Path(d)
-                try:
-                    p = p.resolve()
-                except Exception:
-                    pass
-                if p.exists() and p.is_dir() and str(p) not in seen_roots:
-                    search_roots.append(p)
-                    seen_roots.add(str(p))
+                if d and Path(d).exists() and Path(d).is_dir():
+                    local_dirs.append(Path(d))
 
-        if not search_roots:
-            return False
+        for d in local_dirs:
+            for ext in ["*.dwg", "*.bak", "*.dxf"]:
+                for candidate in d.glob(ext):
+                    if not candidate.is_file():
+                        continue
+                    norm_cand = normalize_name(candidate.stem)
 
-        for root in search_roots:
-            for candidate in root.rglob("*"):
-                if not candidate.is_file():
-                    continue
-                if candidate.suffix.lower() not in {".dwg", ".bak", ".dxf"}:
-                    continue
-                cand_variants = stem_variants(candidate.stem)
-                if cand_variants & target_variants:
-                    logger.info(
-                        "Associated drawing file found globally: '%s' matching '%s'",
-                        candidate.name, sqlite_file.name
-                    )
-                    return True
+                    # Primary criteria: Exact normalized stem match
+                    if norm_cand == norm_sqlite_stem:
+                        logger.info(
+                            "Exact associated drawing file found locally in '%s': '%s' matching candidate '%s'",
+                            d, candidate.name, sqlite_file.name
+                        )
+                        return True
+
+                    # Secondary fallback: GUID/Hash suffix match (e.g. Plan_Chantier_1b369 matching Plan_Chantier)
+                    if "_" in stem or "-" in stem:
+                        prefix = stem.rsplit("_", 1)[0] if "_" in stem else stem.rsplit("-", 1)[0]
+                        if normalize_name(prefix) == norm_cand:
+                            logger.warning(
+                                "Prefix DWG association fallback triggered: '%s' matching '%s' (verify model uniqueness)",
+                                candidate.name, sqlite_file.name
+                            )
+                            return True
+
+        # 2. Check global drawing index (Exact normalized stem match)
+        global_dwg_stems = _get_global_dwg_stems()
+        if norm_sqlite_stem in global_dwg_stems:
+            logger.info(
+                "Exact associated drawing file found globally on system matching candidate SQLite: '%s'",
+                sqlite_file.name
+            )
+            return True
+
+        # 3. Suffix/Prefix fallback check on global index (log WARNING)
+        if "_" in stem or "-" in stem:
+            prefix = stem.rsplit("_", 1)[0] if "_" in stem else stem.rsplit("-", 1)[0]
+            norm_prefix = normalize_name(prefix)
+            if norm_prefix and norm_prefix in global_dwg_stems:
+                logger.warning(
+                    "Prefix DWG association fallback triggered globally: prefix '%s' of '%s' matches a DWG file",
+                    prefix, sqlite_file.name
+                )
+                return True
 
     except Exception as e:
         logger.warning("Error checking associated DWG for '%s': %s", sqlite_path, e)
@@ -389,9 +484,9 @@ def is_autodesk_sqlite(file_path: str, check_dwg_association: bool = True) -> bo
             _ANALYZED_SQLITES[cache_key] = (mtime, False)
             return False
 
-        # Level 2: System filename exclusion
+        # Level 2: Autodesk system database exclusion (e.g. tbsys.sqlite)
         fname = Path(file_path).name.lower()
-        if "tbsys" in fname or "system" in fname:
+        if fname == "tbsys" or fname == "tbsys.sqlite" or fname.startswith("tbsys_"):
             _ANALYZED_SQLITES[cache_key] = (mtime, False)
             return False
 
