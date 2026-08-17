@@ -484,9 +484,9 @@ def is_autodesk_sqlite(file_path: str, check_dwg_association: bool = True) -> bo
             _ANALYZED_SQLITES[cache_key] = (mtime, False)
             return False
 
-        # Level 2: Autodesk system database exclusion (e.g. tbsys.sqlite)
+        # Level 2: Autodesk system database exclusion (e.g. tbsys, embeddedtbsys, tbsys.sqlite)
         fname = Path(file_path).name.lower()
-        if fname == "tbsys" or fname == "tbsys.sqlite" or fname.startswith("tbsys_"):
+        if "tbsys" in fname:
             _ANALYZED_SQLITES[cache_key] = (mtime, False)
             return False
 
