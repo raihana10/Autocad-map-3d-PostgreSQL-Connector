@@ -262,42 +262,109 @@ _SQLITE_MAGIC = b"SQLite format 3\x00"
 _ANALYZED_SQLITES = {}
 
 
-def is_autodesk_sqlite(file_path: str) -> bool:
+def has_associated_dwg(sqlite_path: str, extra_search_dirs: list = None) -> bool:
     """
-    4-level validation algorithm to verify if a file is an Autodesk Data Model:
+    Checks if a SQLite database file has an associated AutoCAD Drawing (.dwg or .bak)
+    file with the same base filename stem.
+
+    A Drawing-side SQLite instance is created by AutoCAD Map 3D when a drawing is opened
+    or created from an Industry Model template. It shares the base filename stem with
+    the drawing (e.g. `Drawing6.sqlite` <-> `Drawing6.dwg` or `Drawing6.bak`).
+
+    Master Industry Models created in Infrastructure Administrator do NOT have associated
+    .dwg files with the same name.
+
+    Args:
+        sqlite_path (str): Path to candidate SQLite database file.
+        extra_search_dirs (list, optional): Additional directories to search for matching .dwg files.
+
+    Returns:
+        bool: True if an associated .dwg or .bak drawing file is found, False otherwise.
+    """
+    try:
+        sqlite_file = Path(sqlite_path)
+        stem = sqlite_file.stem
+        if not stem:
+            return False
+
+        search_dirs = [sqlite_file.parent]
+
+        # Add configured search directories from environment variable
+        dwg_dirs_env = os.environ.get("DWG_SEARCH_DIRS", "")
+        if dwg_dirs_env:
+            for d in dwg_dirs_env.split(";"):
+                d_str = d.strip()
+                if d_str and Path(d_str).is_dir():
+                    search_dirs.append(Path(d_str))
+
+        if extra_search_dirs:
+            for d in extra_search_dirs:
+                if d and Path(d).is_dir():
+                    search_dirs.append(Path(d))
+
+        for sdir in search_dirs:
+            for ext in [".dwg", ".bak"]:
+                target_file = sdir / f"{stem}{ext}"
+                if target_file.exists():
+                    logger.info(
+                        "Associated drawing file found: '%s' matching '%s'",
+                        target_file.name, sqlite_file.name
+                    )
+                    return True
+
+                # Case-insensitive fallback check
+                for candidate in sdir.glob(f"{stem}.*"):
+                    if candidate.suffix.lower() in [".dwg", ".bak"]:
+                        logger.info(
+                            "Associated drawing file found: '%s' matching '%s'",
+                            candidate.name, sqlite_file.name
+                        )
+                        return True
+    except Exception as e:
+        logger.warning("Error checking associated DWG for '%s': %s", sqlite_path, e)
+
+    return False
+
+
+def is_autodesk_sqlite(file_path: str, check_dwg_association: bool = True) -> bool:
+    """
+    5-level validation algorithm to verify if a file is an Autodesk Master Data Model:
     - Level 1: File extension filter (reject non-database files immediately).
-    - Level 2: Filename filter (exclude Autodesk system files like tbsys.sqlite).
+    - Level 2: System filename filter (exclude system files like tbsys.sqlite).
     - Level 3: Magic header check (verify 'SQLite format 3\\x00' 16-byte signature).
     - Level 4: Master table check (verify existence of system table 'TB_DICTIONARY').
+    - Level 5: Associated DWG check (reject drawing-side SQLite copies linked to a .dwg file).
 
     Uses an mtime cache to avoid repeated file read operations during polling.
 
     Args:
         file_path (str): File path to evaluate.
+        check_dwg_association (bool): If True, filters out drawing-side SQLite copies.
 
     Returns:
-        bool: True if the file is a valid Autodesk Industry Model SQLite database.
+        bool: True if the file is a valid Autodesk Master Industry Model SQLite database.
     """
     try:
         if not os.path.isfile(file_path):
             return False
 
+        cache_key = (file_path, check_dwg_association)
         mtime = os.path.getmtime(file_path)
-        if file_path in _ANALYZED_SQLITES:
-            cached_mtime, cached_val = _ANALYZED_SQLITES[file_path]
+        if cache_key in _ANALYZED_SQLITES:
+            cached_mtime, cached_val = _ANALYZED_SQLITES[cache_key]
             if cached_mtime == mtime:
                 return cached_val
 
         # Level 1: Extension filter
         ext = Path(file_path).suffix.lower()
         if ext in _NON_SQLITE_EXTS:
-            _ANALYZED_SQLITES[file_path] = (mtime, False)
+            _ANALYZED_SQLITES[cache_key] = (mtime, False)
             return False
 
         # Level 2: System filename exclusion
         fname = Path(file_path).name.lower()
         if "tbsys" in fname or "system" in fname:
-            _ANALYZED_SQLITES[file_path] = (mtime, False)
+            _ANALYZED_SQLITES[cache_key] = (mtime, False)
             return False
 
         # Level 3: SQLite 16-byte magic header verification
@@ -305,7 +372,7 @@ def is_autodesk_sqlite(file_path: str) -> bool:
             with open(file_path, "rb") as f:
                 header = f.read(16)
             if header != _SQLITE_MAGIC:
-                _ANALYZED_SQLITES[file_path] = (mtime, False)
+                _ANALYZED_SQLITES[cache_key] = (mtime, False)
                 return False
         except (OSError, PermissionError):
             return False
@@ -319,13 +386,23 @@ def is_autodesk_sqlite(file_path: str) -> bool:
         has_tb_dict = cursor.fetchone() is not None
         conn.close()
 
-        if has_tb_dict:
-            logger.info("Valid Autodesk Industry Model found: %s", file_path)
-        else:
+        if not has_tb_dict:
             logger.debug("Table 'TB_DICTIONARY' absent in %s (not an Industry Model)", file_path)
+            _ANALYZED_SQLITES[cache_key] = (mtime, False)
+            return False
 
-        _ANALYZED_SQLITES[file_path] = (mtime, has_tb_dict)
-        return has_tb_dict
+        # Level 5: Associated DWG check (reject drawing-side SQLite instances)
+        if check_dwg_association and has_associated_dwg(file_path):
+            logger.info(
+                "Skipping drawing-side SQLite copy: '%s' (associated .dwg/.bak file found)",
+                Path(file_path).name
+            )
+            _ANALYZED_SQLITES[cache_key] = (mtime, False)
+            return False
+
+        logger.info("Valid Autodesk Master Industry Model found: %s", file_path)
+        _ANALYZED_SQLITES[cache_key] = (mtime, True)
+        return True
     except Exception as e:
         logger.error("Error checking file '%s': %s", file_path, e, exc_info=True)
         return False

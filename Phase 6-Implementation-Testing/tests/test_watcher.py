@@ -16,6 +16,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from watch_and_sync import (
     is_autodesk_sqlite,
+    has_associated_dwg,
     detect_schema_differences,
     sync_data,
     clean_postgres_db_name,
@@ -32,6 +33,41 @@ def test_is_autodesk_sqlite(temp_sqlite_file):
     conn.close()
 
     assert is_autodesk_sqlite(temp_sqlite_file) is True
+
+
+def test_has_associated_dwg(tmp_path):
+    """Test detection of associated .dwg file matching SQLite stem."""
+    sqlite_file = tmp_path / "Drawing6.sqlite"
+    dwg_file = tmp_path / "Drawing6.dwg"
+    sqlite_file.write_bytes(b"dummy")
+    dwg_file.write_bytes(b"dummy dwg")
+
+    assert has_associated_dwg(str(sqlite_file)) is True
+
+    # Test master file without matching DWG
+    master_file = tmp_path / "MasterModel.sqlite"
+    master_file.write_bytes(b"dummy")
+    assert has_associated_dwg(str(master_file)) is False
+
+
+def test_is_autodesk_sqlite_rejects_drawing_instance(tmp_path):
+    """Test that is_autodesk_sqlite rejects SQLite file when matching DWG is present."""
+    sqlite_file = tmp_path / "Drawing6.sqlite"
+    dwg_file = tmp_path / "Drawing6.dwg"
+    dwg_file.write_bytes(b"dummy dwg")
+
+    conn = sqlite3.connect(str(sqlite_file))
+    cur = conn.cursor()
+    cur.execute("CREATE TABLE TB_DICTIONARY (F_CLASS_ID INT, F_CLASS_NAME TEXT);")
+    cur.execute("INSERT INTO TB_DICTIONARY VALUES (1, 'TEST');")
+    conn.commit()
+    conn.close()
+
+    # With DWG present -> Rejected as drawing copy
+    assert is_autodesk_sqlite(str(sqlite_file), check_dwg_association=True) is False
+
+    # With check_dwg_association=False -> Accepted
+    assert is_autodesk_sqlite(str(sqlite_file), check_dwg_association=False) is True
 
 
 def test_is_not_autodesk_sqlite(tmp_path):
