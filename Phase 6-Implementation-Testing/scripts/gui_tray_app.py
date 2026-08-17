@@ -453,17 +453,30 @@ class TrayApp:
 
     def _build_menu(self):
         import pystray
-        status_label = f"Status: {'▶ Running' if self.engine.is_running() else '■ Stopped'}"
-        pause_label  = "⏸ Pause Sync" if not self._paused else "▶ Resume Sync"
-        return pystray.Menu(
-            pystray.MenuItem(status_label, None, enabled=False),
-            pystray.Menu.SEPARATOR,
-            pystray.MenuItem("⚙ Settings",  lambda icon, item: self._open_settings()),
-            pystray.MenuItem("📋 View Logs", lambda icon, item: self._open_logs()),
-            pystray.MenuItem(pause_label,   lambda icon, item: self._toggle_pause()),
-            pystray.Menu.SEPARATOR,
-            pystray.MenuItem("✖ Exit",      lambda icon, item: self._exit()),
-        )
+        items = []
+
+        if self.engine.is_running() and not self._paused:
+            items.append(pystray.MenuItem("Status: 🟢 Active", None, enabled=False))
+            items.append(pystray.Menu.SEPARATOR)
+            items.append(pystray.MenuItem("⏸ Pause Sync",  lambda icon, item: self._pause_service()))
+            items.append(pystray.MenuItem("⏹ Stop Service", lambda icon, item: self._stop_service()))
+        elif self._paused:
+            items.append(pystray.MenuItem("Status: 🟧 Paused", None, enabled=False))
+            items.append(pystray.Menu.SEPARATOR)
+            items.append(pystray.MenuItem("▶ Resume Sync", lambda icon, item: self._start_service()))
+            items.append(pystray.MenuItem("⏹ Stop Service", lambda icon, item: self._stop_service()))
+        else:
+            items.append(pystray.MenuItem("Status: 🔴 Stopped", None, enabled=False))
+            items.append(pystray.Menu.SEPARATOR)
+            items.append(pystray.MenuItem("▶ Start Service", lambda icon, item: self._start_service()))
+
+        items.append(pystray.Menu.SEPARATOR)
+        items.append(pystray.MenuItem("⚙ Settings",    lambda icon, item: self._open_settings()))
+        items.append(pystray.MenuItem("📋 View Logs",  lambda icon, item: self._open_logs()))
+        items.append(pystray.Menu.SEPARATOR)
+        items.append(pystray.MenuItem("✖ Quit App",    lambda icon, item: self._exit()))
+
+        return pystray.Menu(*items)
 
     def _update_icon_color(self):
         if self._icon is None:
@@ -474,9 +487,9 @@ class TrayApp:
             color = "#28A745"    # Green  = running
         else:
             color = "#DC3545"    # Red    = stopped
+
         self._icon.icon = self._make_icon_image(color)
         self._icon.menu = self._build_menu()
-
 
     # ---- Actions called from tray menu (may be on pystray thread) ----------
 
@@ -486,15 +499,22 @@ class TrayApp:
     def _open_logs(self):
         self.root.after(0, self._show_log_window)
 
-    def _toggle_pause(self):
-        if self._paused:
-            self._paused = False
-            self.engine.start(self.cfg)
-            logger.info("Sync service resumed.")
-        else:
-            self._paused = True
-            self.engine.stop()
-            logger.info("Sync service paused by user.")
+    def _start_service(self):
+        self._paused = False
+        self.engine.start(self.cfg)
+        logger.info("Sync service started/resumed by user.")
+        self._update_icon_color()
+
+    def _pause_service(self):
+        self._paused = True
+        self.engine.stop()
+        logger.info("Sync service paused by user.")
+        self._update_icon_color()
+
+    def _stop_service(self):
+        self._paused = False
+        self.engine.stop()
+        logger.info("Sync service stopped by user.")
         self._update_icon_color()
 
     def _exit(self):
