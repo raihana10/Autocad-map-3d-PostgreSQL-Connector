@@ -1,4 +1,4 @@
-# Alternative libre à TKI PGP — Industry Model Autodesk vers PostgreSQL/PostGIS
+# PostMap Live — Alternative libre à TKI PGP (Industry Model Autodesk vers PostgreSQL/PostGIS)
 
 > Projet de fin d'année (stage PFA) visant à concevoir une alternative open-source au connecteur commercial **TKI PGP**, permettant d'utiliser **PostgreSQL/PostGIS** comme moteur de stockage pour un **Industry Model** (Fachschale) Autodesk, en lieu et place d'Oracle ou de Microsoft SQL Server.
 
@@ -80,6 +80,9 @@ Infrastructure Administrator ──► Data Model (export SQLite)
 
 ```
 .
+├── docker/                              # Stack Docker de conteneurisation et de monitoring
+│   ├── docker-compose.yml              # Services : PostgreSQL/PostGIS, Exporter, Prometheus, Grafana
+│   └── prometheus.yml                  # Configuration du scraping des métriques Prometheus
 ├── Phase 1-FDO-Provider-Analysis/
 │   ├── 01-autodesk-architecture.md      # Phase 1 — architecture Autodesk observée (FR)
 │   └── 01-autodesk-architecture_EN.md   # Phase 1 — architecture Autodesk observée (EN)
@@ -100,14 +103,22 @@ Infrastructure Administrator ──► Data Model (export SQLite)
 │   ├── 05-architecture-cible.md         # Phase 5 — Architecture cible & solution alternative (FR)
 │   └── 05-architecture-cible_EN.md      # Phase 5 — Architecture cible & solution alternative (EN)
 ├── Phase 6-Implementation-Testing/
+│   ├── assets/                          # Icônes de marque et ressources de la barre des tâches
 │   ├── scripts/
 │   │   ├── convert_autodesk_to_postgis.py   # Convertisseur automatisé SQLite vers DDL PostgreSQL
-│   │   └── watch_and_sync.py                # Service de surveillance et synchronisation en temps réel
+│   │   ├── watch_and_sync.py                # Service de surveillance et synchronisation en temps réel
+│   │   ├── gui_tray_app.py                  # Application GUI barre des tâches Windows (PostMap Live)
+│   │   ├── build_exe.py                     # Script d'automatisation du build PyInstaller
+│   │   ├── config.env                       # Fichier de configuration des paramètres
+│   │   └── PostMapLive.spec                 # Fichier de spécification PyInstaller
 │   ├── tests/
 │   │   ├── conftest.py                      # Fixtures Pytest et configuration partagée
 │   │   ├── test_converter.py                # Tests unitaires du convertisseur DDL
 │   │   ├── test_inheritance.py              # Tests unitaires pour l'héritage de tables
 │   │   └── test_watcher.py                  # Tests unitaires du service de surveillance
+│   ├── 06-testing-user-guide_EN.md          # Phase 6 — Guide utilisateur et tests (EN)
+│   ├── 06-testing-user-guide_FR.md          # Phase 6 — Guide utilisateur et tests (FR)
+│   ├── installer_setup.iss                  # Script d'installation Inno Setup pour PostMap Live
 │   └── requirements-dev.txt                 # Dépendances de développement et de test
 ├── README_FR.md                         # README principal (Français)
 └── README.md                            # README principal (Anglais)
@@ -118,7 +129,10 @@ Infrastructure Administrator ──► Data Model (export SQLite)
 - **AutoCAD Map 3D** / **Autodesk Infrastructure Administrator** — environnement de référence
 - **PostgreSQL** / **PostGIS** — base de données cible
 - **SQLite** — format de stockage intermédiaire du Data Model, analysé en Phase 3
-- **Python** — scripts d'analyse, de comparaison et de génération DDL (`compare_sqlite.py`, `convert_autodesk_to_postgis.py`)
+- **Python** — scripts d'analyse, de comparaison, génération DDL et application tray (`PySide6`, `pystray`, `watchdog`, `psycopg2`)
+- **Docker** / **Docker Compose** — environnement conteneurisé pour la base de données et la stack de monitoring
+- **Prometheus** & **Grafana** — collecte de métriques et tableaux de bord de suivi des performances PostgreSQL
+- **Inno Setup** / **PyInstaller** — empaquetage de l'exécutable autonome et création de l'installateur Windows
 - **Git** — gestion de version
 
 ## Méthodologie
@@ -137,6 +151,5 @@ Projet réalisé dans le cadre d'un stage de fin d'année (PFA), en binôme.
 
 ## Licence
 
-© 2026 — Tous droits réservés.
+Ce projet est distribué sous licence [MIT](LICENSE).
 
-Ce projet est réalisé dans le cadre d'un stage de fin d'année. Son statut de propriété intellectuelle n'est pas encore définitivement fixé. Aucune licence d'utilisation, de copie, de modification ou de redistribution n'est accordée à ce stade. Le code est visible publiquement à titre de démonstration/portfolio uniquement.

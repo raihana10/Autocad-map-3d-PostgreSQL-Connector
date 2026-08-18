@@ -1,4 +1,4 @@
-# Open-Source Alternative to TKI PGP — Autodesk Industry Model to PostgreSQL/PostGIS
+# PostMap Live — Open-Source Alternative to TKI PGP (Autodesk Industry Model to PostgreSQL/PostGIS)
 
 > End-of-year internship project (PFA) aiming to design an open-source alternative to the commercial connector **TKI PGP**, enabling **PostgreSQL/PostGIS** to be used as the storage engine for an Autodesk **Industry Model** (*Fachschale*), instead of Oracle or Microsoft SQL Server.
 
@@ -80,6 +80,9 @@ Infrastructure Administrator ──► Data Model (SQLite export)
 
 ```
 .
+├── docker/                              # Docker containerization & monitoring stack
+│   ├── docker-compose.yml              # Services: PostgreSQL/PostGIS, Exporter, Prometheus, Grafana
+│   └── prometheus.yml                  # Prometheus metrics scraping configuration
 ├── Phase 1-FDO-Provider-Analysis/
 │   ├── 01-autodesk-architecture.md      # Phase 1 — Observed Autodesk architecture (FR)
 │   └── 01-autodesk-architecture_EN.md   # Phase 1 — Observed Autodesk architecture (EN)
@@ -100,14 +103,22 @@ Infrastructure Administrator ──► Data Model (SQLite export)
 │   ├── 05-architecture-cible.md         # Phase 5 — Target architecture & alternative solution (FR)
 │   └── 05-architecture-cible_EN.md      # Phase 5 — Target architecture & alternative solution (EN)
 ├── Phase 6-Implementation-Testing/
+│   ├── assets/                          # App branding icons and system tray assets
 │   ├── scripts/
 │   │   ├── convert_autodesk_to_postgis.py   # Automated SQLite to PostgreSQL DDL converter
-│   │   └── watch_and_sync.py                # Live watcher and auto-sync service
+│   │   ├── watch_and_sync.py                # Live watcher and auto-sync service
+│   │   ├── gui_tray_app.py                  # Windows System Tray GUI application (PostMap Live)
+│   │   ├── build_exe.py                     # PyInstaller build automation script
+│   │   ├── config.env                       # Live configuration settings
+│   │   └── PostMapLive.spec                 # PyInstaller spec file
 │   ├── tests/
 │   │   ├── conftest.py                      # Pytest fixtures and shared configuration
 │   │   ├── test_converter.py                # Unit tests for the DDL converter
 │   │   ├── test_inheritance.py              # Unit tests for table inheritance logic
 │   │   └── test_watcher.py                  # Unit tests for the watcher service
+│   ├── 06-testing-user-guide_EN.md          # Phase 6 — Testing and deployment user guide (EN)
+│   ├── 06-testing-user-guide_FR.md          # Phase 6 — Testing and deployment user guide (FR)
+│   ├── installer_setup.iss                  # Inno Setup installer script for PostMap Live
 │   └── requirements-dev.txt                 # Development and testing dependencies
 ├── README_FR.md                         # Main README (French)
 └── README.md                            # Main README (English)
@@ -118,7 +129,10 @@ Infrastructure Administrator ──► Data Model (SQLite export)
 - **AutoCAD Map 3D** / **Autodesk Infrastructure Administrator** — Reference environment
 - **PostgreSQL** / **PostGIS** — Target database
 - **SQLite** — Intermediate Data Model storage format, analyzed in Phase 3
-- **Python** — Analysis, comparison, and DDL generation scripts (`compare_sqlite.py`, `convert_autodesk_to_postgis.py`)
+- **Python** — Analysis, comparison, DDL generation, and system tray app (`PySide6`, `pystray`, `watchdog`, `psycopg2`)
+- **Docker** / **Docker Compose** — Containerized environment for database and monitoring stack
+- **Prometheus** & **Grafana** — Database performance, connection, and metrics monitoring dashboard
+- **Inno Setup** / **PyInstaller** — Standalone executable packaging and Windows installer creation
 - **Git** — Version control
 
 ## Methodology
@@ -137,6 +151,5 @@ Project carried out as part of an end-of-year internship (PFA), in a team of two
 
 ## License
 
-© 2026 — All rights reserved.
+This project is licensed under the [MIT License](LICENSE).
 
-This project was carried out as part of an end-of-year internship. Its intellectual property status is not yet permanently settled. No license to use, copy, modify, or redistribute is granted at this stage. The code is publicly visible for demonstration/portfolio purposes only.
