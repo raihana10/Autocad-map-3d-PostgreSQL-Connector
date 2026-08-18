@@ -44,6 +44,39 @@ from datetime import datetime
 
 logger = logging.getLogger(__name__)
 
+
+def normalize_output_sql_path(output_sql: str | None) -> str | None:
+    """
+    Resolve SQL output paths to a stable, writable location.
+
+    IMPORTANT - PyInstaller onefile issue:
+      When frozen, each invocation of sys.executable (including subprocesses)
+      extracts to a DIFFERENT _MEI* temp folder. Writing SQL to __file__'s
+      parent (_MEI124282) means the subprocess writes to _MEI124283 and the
+      parent cannot read it. Fix: always redirect to APPDATA when frozen.
+    """
+    if not output_sql:
+        return output_sql
+
+    path = Path(output_sql)
+
+    # When running as PyInstaller frozen app, route all SQL output to APPDATA
+    if getattr(sys, "frozen", False):
+        appdata_sql_dir = (
+            Path(os.environ.get("APPDATA", Path.home()))
+            / "PostMapLive"
+            / "sql"
+        )
+        appdata_sql_dir.mkdir(parents=True, exist_ok=True)
+        return str(appdata_sql_dir / path.name)
+
+    # Development mode: keep original relative-to-script behavior
+    if path.is_absolute():
+        return str(path)
+    return str((Path(__file__).resolve().parent / path).resolve())
+
+
+
 # Force UTF-8 encoding for Windows console to avoid charmap encoding errors
 if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
@@ -229,42 +262,232 @@ _SQLITE_MAGIC = b"SQLite format 3\x00"
 _ANALYZED_SQLITES = {}
 
 
-def is_autodesk_sqlite(file_path: str) -> bool:
+## System-wide DWG index cache: (last_scan_time, set_of_normalized_stems)
+_GLOBAL_DWG_INDEX = (0, set())
+_DWG_INDEX_TTL = 30.0  # seconds
+
+
+def _get_global_dwg_stems() -> set:
     """
-    4-level validation algorithm to verify if a file is an Autodesk Data Model:
+    Scans targeted drawing locations (user profile folders, monitor zones, and custom search paths)
+    for all .dwg, .bak, and .dxf drawing files, returning a normalized set of drawing stems.
+
+    By default, search is restricted to user document locations for maximum performance.
+    Full drive-wide scanning (C:\\, D:\\...) can be enabled by setting ENABLE_FULL_SYSTEM_DWG_SCAN=1.
+
+    Cached for 30 seconds to optimize polling performance.
+    """
+    global _GLOBAL_DWG_INDEX
+    last_time, cached_stems = _GLOBAL_DWG_INDEX
+    now = time.time()
+    if cached_stems and (now - last_time) < _DWG_INDEX_TTL:
+        return cached_stems
+
+    import unicodedata
+    import re
+    import string
+
+    def normalize_name(value: str) -> str:
+        value = unicodedata.normalize("NFKD", value)
+        value = value.encode("ascii", "ignore").decode("ascii")
+        value = value.casefold().strip()
+        value = re.sub(r"[\s_\-.]+", "", value)
+        return value
+
+    stems = set()
+    search_roots = []
+    seen_roots = set()
+
+    # Standard user profile locations
+    home = Path.home()
+    user_dirs = [
+        home / "Documents",
+        home / "OneDrive" / "Documents",
+        home / "Desktop",
+        home / "OneDrive" / "Desktop",
+        home / "Downloads",
+    ]
+    for d in user_dirs:
+        if d.exists() and d.is_dir() and str(d) not in seen_roots:
+            search_roots.append(d)
+            seen_roots.add(str(d))
+
+    # Configured monitor zone and search directories
+    monitor_dir = os.environ.get("MONITOR_DIR")
+    if monitor_dir and Path(monitor_dir).exists():
+        p = Path(monitor_dir).resolve()
+        if str(p) not in seen_roots:
+            search_roots.append(p)
+            seen_roots.add(str(p))
+
+    if os.environ.get("DWG_SEARCH_DIRS"):
+        for d in os.environ.get("DWG_SEARCH_DIRS").split(";"):
+            if d:
+                try:
+                    p = Path(d).resolve()
+                    if p.exists() and p.is_dir() and str(p) not in seen_roots:
+                        search_roots.append(p)
+                        seen_roots.add(str(p))
+                except Exception:
+                    pass
+
+    # Optional full drive scan (only if explicitly enabled via environment variable)
+    if os.environ.get("ENABLE_FULL_SYSTEM_DWG_SCAN") == "1" and sys.platform == "win32":
+        logger.info("ENABLE_FULL_SYSTEM_DWG_SCAN=1 enabled: Scanning drive roots for DWG files...")
+        for letter in string.ascii_uppercase:
+            drive = Path(f"{letter}:\\")
+            if drive.exists() and str(drive) not in seen_roots:
+                search_roots.append(drive)
+                seen_roots.add(str(drive))
+
+    skip_dirs = {
+        "windows", "program files", "program files (x86)", ".git",
+        "node_modules", "$recycle.bin", "system volume information", ".gemini", "appdata"
+    }
+
+    for root in search_roots:
+        try:
+            for dirpath, dirs, filenames in os.walk(root):
+                # Prune skipped directories in-place to prevent os.walk from descending into them
+                dirs[:] = [d for d in dirs if d.lower() not in skip_dirs and not d.startswith(".")]
+
+                for fname in filenames:
+                    ext = os.path.splitext(fname)[1].lower()
+                    if ext in [".dwg", ".bak", ".dxf"]:
+                        stem = os.path.splitext(fname)[0]
+                        norm = normalize_name(stem)
+                        if norm:
+                            stems.add(norm)
+        except Exception as e:
+            logger.debug("Error indexing DWG root '%s': %s", root, e)
+
+    logger.debug("DWG index built: %d drawing stem(s) registered", len(stems))
+    _GLOBAL_DWG_INDEX = (now, stems)
+    return stems
+
+
+def has_associated_dwg(sqlite_path: str, extra_search_dirs: list = None) -> bool:
+    """
+    Checks whether a SQLite file is a drawing-side copy associated with an AutoCAD .dwg/.bak/.dxf file.
+    Uses strict exact stem matching first to avoid false positives on Master Industry Models.
+    """
+    try:
+        sqlite_file = Path(sqlite_path)
+        stem = sqlite_file.stem
+        if not stem:
+            return False
+
+        import re
+        import unicodedata
+
+        def normalize_name(value: str) -> str:
+            value = unicodedata.normalize("NFKD", value)
+            value = value.encode("ascii", "ignore").decode("ascii")
+            value = value.casefold().strip()
+            value = re.sub(r"[\s_\-.]+", "", value)
+            return value
+
+        norm_sqlite_stem = normalize_name(stem)
+        if not norm_sqlite_stem:
+            return False
+
+        # 1. Check local folder first (exact stem match in sqlite_file.parent and extra_search_dirs)
+        local_dirs = [sqlite_file.parent]
+        if extra_search_dirs:
+            for d in extra_search_dirs:
+                if d and Path(d).exists() and Path(d).is_dir():
+                    local_dirs.append(Path(d))
+
+        for d in local_dirs:
+            for ext in ["*.dwg", "*.bak", "*.dxf"]:
+                for candidate in d.glob(ext):
+                    if not candidate.is_file():
+                        continue
+                    norm_cand = normalize_name(candidate.stem)
+
+                    # Primary criteria: Exact normalized stem match
+                    if norm_cand == norm_sqlite_stem:
+                        logger.info(
+                            "Exact associated drawing file found locally in '%s': '%s' matching candidate '%s'",
+                            d, candidate.name, sqlite_file.name
+                        )
+                        return True
+
+                    # Secondary fallback: GUID/Hash suffix match (e.g. Plan_Chantier_1b369 matching Plan_Chantier)
+                    if "_" in stem or "-" in stem:
+                        prefix = stem.rsplit("_", 1)[0] if "_" in stem else stem.rsplit("-", 1)[0]
+                        if normalize_name(prefix) == norm_cand:
+                            logger.warning(
+                                "Prefix DWG association fallback triggered: '%s' matching '%s' (verify model uniqueness)",
+                                candidate.name, sqlite_file.name
+                            )
+                            return True
+
+        # 2. Check global drawing index (Exact normalized stem match)
+        global_dwg_stems = _get_global_dwg_stems()
+        if norm_sqlite_stem in global_dwg_stems:
+            logger.info(
+                "Exact associated drawing file found globally on system matching candidate SQLite: '%s'",
+                sqlite_file.name
+            )
+            return True
+
+        # 3. Suffix/Prefix fallback check on global index (log WARNING)
+        if "_" in stem or "-" in stem:
+            prefix = stem.rsplit("_", 1)[0] if "_" in stem else stem.rsplit("-", 1)[0]
+            norm_prefix = normalize_name(prefix)
+            if norm_prefix and norm_prefix in global_dwg_stems:
+                logger.warning(
+                    "Prefix DWG association fallback triggered globally: prefix '%s' of '%s' matches a DWG file",
+                    prefix, sqlite_file.name
+                )
+                return True
+
+    except Exception as e:
+        logger.warning("Error checking associated DWG for '%s': %s", sqlite_path, e)
+
+    return False
+
+
+def is_autodesk_sqlite(file_path: str, check_dwg_association: bool = True) -> bool:
+    """
+    5-level validation algorithm to verify if a file is an Autodesk Master Data Model:
     - Level 1: File extension filter (reject non-database files immediately).
-    - Level 2: Filename filter (exclude Autodesk system files like tbsys.sqlite).
+    - Level 2: System filename filter (exclude system files like tbsys.sqlite).
     - Level 3: Magic header check (verify 'SQLite format 3\\x00' 16-byte signature).
     - Level 4: Master table check (verify existence of system table 'TB_DICTIONARY').
+    - Level 5: Associated DWG check (reject drawing-side SQLite copies linked to a .dwg file).
 
     Uses an mtime cache to avoid repeated file read operations during polling.
 
     Args:
         file_path (str): File path to evaluate.
+        check_dwg_association (bool): If True, filters out drawing-side SQLite copies.
 
     Returns:
-        bool: True if the file is a valid Autodesk Industry Model SQLite database.
+        bool: True if the file is a valid Autodesk Master Industry Model SQLite database.
     """
     try:
         if not os.path.isfile(file_path):
             return False
 
+        cache_key = (file_path, check_dwg_association)
         mtime = os.path.getmtime(file_path)
-        if file_path in _ANALYZED_SQLITES:
-            cached_mtime, cached_val = _ANALYZED_SQLITES[file_path]
+        if cache_key in _ANALYZED_SQLITES:
+            cached_mtime, cached_val = _ANALYZED_SQLITES[cache_key]
             if cached_mtime == mtime:
                 return cached_val
 
         # Level 1: Extension filter
         ext = Path(file_path).suffix.lower()
         if ext in _NON_SQLITE_EXTS:
-            _ANALYZED_SQLITES[file_path] = (mtime, False)
+            _ANALYZED_SQLITES[cache_key] = (mtime, False)
             return False
 
-        # Level 2: System filename exclusion
+        # Level 2: Autodesk system database exclusion (e.g. tbsys, embeddedtbsys, tbsys.sqlite)
         fname = Path(file_path).name.lower()
-        if "tbsys" in fname or "system" in fname:
-            _ANALYZED_SQLITES[file_path] = (mtime, False)
+        if "tbsys" in fname:
+            _ANALYZED_SQLITES[cache_key] = (mtime, False)
             return False
 
         # Level 3: SQLite 16-byte magic header verification
@@ -272,7 +495,7 @@ def is_autodesk_sqlite(file_path: str) -> bool:
             with open(file_path, "rb") as f:
                 header = f.read(16)
             if header != _SQLITE_MAGIC:
-                _ANALYZED_SQLITES[file_path] = (mtime, False)
+                _ANALYZED_SQLITES[cache_key] = (mtime, False)
                 return False
         except (OSError, PermissionError):
             return False
@@ -286,13 +509,23 @@ def is_autodesk_sqlite(file_path: str) -> bool:
         has_tb_dict = cursor.fetchone() is not None
         conn.close()
 
-        if has_tb_dict:
-            logger.info("Valid Autodesk Industry Model found: %s", file_path)
-        else:
+        if not has_tb_dict:
             logger.debug("Table 'TB_DICTIONARY' absent in %s (not an Industry Model)", file_path)
+            _ANALYZED_SQLITES[cache_key] = (mtime, False)
+            return False
 
-        _ANALYZED_SQLITES[file_path] = (mtime, has_tb_dict)
-        return has_tb_dict
+        # Level 5: Associated DWG check (reject drawing-side SQLite instances)
+        if check_dwg_association and has_associated_dwg(file_path):
+            logger.info(
+                "Skipping drawing-side SQLite copy: '%s' (associated .dwg/.bak file found)",
+                Path(file_path).name
+            )
+            _ANALYZED_SQLITES[cache_key] = (mtime, False)
+            return False
+
+        logger.info("Valid Autodesk Master Industry Model found: %s", file_path)
+        _ANALYZED_SQLITES[cache_key] = (mtime, True)
+        return True
     except Exception as e:
         logger.error("Error checking file '%s': %s", file_path, e, exc_info=True)
         return False
@@ -573,11 +806,13 @@ def sync_data(sqlite_path: str, pg_conn, default_srid: int = 2154):
         pg_conn: PostgreSQL connection.
         default_srid (int): Target PostGIS EPSG code.
     """
-    try:
-        from tqdm import tqdm
-        has_tqdm = True
-    except ImportError:
-        has_tqdm = False
+    has_tqdm = False
+    if sys.stderr is not None and getattr(sys.stderr, "write", None) is not None:
+        try:
+            from tqdm import tqdm
+            has_tqdm = True
+        except ImportError:
+            has_tqdm = False
 
     try:
         sq_conn = sqlite3.connect(sqlite_path)
@@ -917,142 +1152,143 @@ def run_conversion_and_apply(sqlite_path: str, output_sql: str, pg_host: str, pg
                              sync_data_flag: bool = False):
     """
     Main orchestration step:
-    1. Invokes `convert_autodesk_to_postgis.py` via subprocess to build DDL SQL.
+    1. Calls generate_postgis_ddl() directly in-process (no subprocess) to build DDL SQL.
+       NOTE: Subprocess was removed — when frozen with PyInstaller --onefile, sys.executable
+       is the .exe itself. Calling it with a script path re-runs TrayApp instead of the
+       converter, writing nothing to disk. Direct import works in both dev + packaged modes.
     2. Connects to PostgreSQL via psycopg2 and executes DDL statements safely.
     3. Runs dynamic column synchronization (`sync_table_columns`).
     4. Runs physical deletion detection (`detect_schema_differences`).
     5. Optionally syncs records (`sync_data`).
     """
-    cmd = [
-        sys.executable,
-        os.path.join(os.path.dirname(__file__), "convert_autodesk_to_postgis.py"),
-        "--db", sqlite_path,
-        "--out", output_sql,
-        "--srid", str(srid)
-    ]
+    output_sql = normalize_output_sql_path(output_sql)
 
-    env = os.environ.copy()
-    env["PYTHONIOENCODING"] = "utf-8"
-    result = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace", env=env)
-
-    if result.returncode == 0:
+    # -------------------------------------------------------------------------
+    # Step 1: DDL conversion (in-process — works in both dev and frozen modes)
+    # -------------------------------------------------------------------------
+    try:
+        from convert_autodesk_to_postgis import generate_postgis_ddl
+        ddl_result = generate_postgis_ddl(sqlite_path, default_srid=srid)
+        Path(output_sql).parent.mkdir(parents=True, exist_ok=True)
+        Path(output_sql).write_text(ddl_result, encoding="utf-8")
         logger.info("DDL conversion successful -> %s", output_sql)
+    except Exception as exc:
+        logger.error("DDL conversion failed for '%s': %s", sqlite_path, exc, exc_info=True)
+        return
 
-        if pg_user and pg_pass:
-            try:
-                import psycopg2
+    if pg_user and pg_pass:
+        try:
+            import psycopg2
 
-                ensure_pg_database_exists(host=pg_host, port=pg_port, user=pg_user, password=pg_pass, dbname=pg_db)
+            ensure_pg_database_exists(host=pg_host, port=pg_port, user=pg_user, password=pg_pass, dbname=pg_db)
 
-                logger.info("Applying DDL to database '%s' (%s:%s)...", pg_db, pg_host, pg_port)
-                conn = psycopg2.connect(host=pg_host, port=pg_port, user=pg_user, password=pg_pass, dbname=pg_db)
-                conn.autocommit = True
-                cursor = conn.cursor()
-                sql_content = Path(output_sql).read_text(encoding="utf-8")
+            logger.info("Applying DDL to database '%s' (%s:%s)...", pg_db, pg_host, pg_port)
+            conn = psycopg2.connect(host=pg_host, port=pg_port, user=pg_user, password=pg_pass, dbname=pg_db)
+            conn.autocommit = True
+            cursor = conn.cursor()
+            sql_content = Path(output_sql).read_text(encoding="utf-8")
 
-                success_count = 0
-                created_tables = []
-                created_domains = []
-                created_indexes = []
-                created_fks = 0
-                created_triggers = []
-                failed_statements = []
+            success_count = 0
+            created_tables = []
+            created_domains = []
+            created_indexes = []
+            created_fks = 0
+            created_triggers = []
+            failed_statements = []
 
-                logger.info("Schema application starting...")
+            logger.info("Schema application starting...")
 
-                existing_pg_tables = get_existing_tables(cursor)
-                existing_pg_indexes = get_existing_indexes(cursor)
-                existing_pg_triggers = get_existing_triggers(cursor)
+            existing_pg_tables = get_existing_tables(cursor)
+            existing_pg_indexes = get_existing_indexes(cursor)
+            existing_pg_triggers = get_existing_triggers(cursor)
 
-                statements = split_sql_statements(sql_content)
+            statements = split_sql_statements(sql_content)
 
-                for stmt in statements:
-                    stmt_clean = stmt.strip()
-                    if not stmt_clean or stmt_clean.startswith("--"):
-                        continue
+            for stmt in statements:
+                stmt_clean = stmt.strip()
+                if not stmt_clean or stmt_clean.startswith("--"):
+                    continue
 
-                    stmt_upper = stmt_clean.upper()
-                    try:
-                        cursor.execute(stmt_clean)
-                        success_count += 1
+                stmt_upper = stmt_clean.upper()
+                try:
+                    cursor.execute(stmt_clean)
+                    success_count += 1
 
-                        if "CREATE TABLE" in stmt_upper:
-                            parts = stmt_clean.split('"')
-                            tname = parts[1] if len(parts) > 1 else "Table"
-                            tname_upper = tname.upper()
-                            if tname_upper not in existing_pg_tables:
-                                existing_pg_tables.add(tname_upper)
-                                if tname.endswith("_TBD") or tname == "TB_DOMAIN":
-                                    created_domains.append(tname)
-                                    logger.info("Domain table '%s' created", tname)
-                                else:
-                                    created_tables.append(tname)
-                                    logger.info("Feature class '%s' created", tname)
-                        elif "CREATE INDEX" in stmt_upper:
-                            parts = stmt_clean.split('"')
-                            idx_name = parts[1] if len(parts) > 1 else "Index"
-                            idx_upper = idx_name.upper()
-                            if idx_upper not in existing_pg_indexes:
-                                existing_pg_indexes.add(idx_upper)
-                                created_indexes.append(idx_name)
-                                logger.info("Spatial index '%s' created", idx_name)
-                        elif "FOREIGN KEY" in stmt_upper:
-                            created_fks += 1
-                        elif "CREATE TRIGGER" in stmt_upper:
-                            parts = stmt_clean.split('"')
-                            trg_name = parts[1] if len(parts) > 1 else "Trigger"
-                            trg_upper = trg_name.upper()
-                            if trg_upper not in existing_pg_triggers:
-                                existing_pg_triggers.add(trg_upper)
-                                created_triggers.append(trg_name)
-                                logger.info("Trigger '%s' activated", trg_name)
-                    except Exception as ex:
-                        conn.rollback()
-                        first_line = stmt_clean.splitlines()[0][:120]
-                        failed_statements.append((first_line, str(ex)))
-                        logger.error("SQL Error: %s -> %s", first_line, ex)
+                    if "CREATE TABLE" in stmt_upper:
+                        parts = stmt_clean.split('"')
+                        tname = parts[1] if len(parts) > 1 else "Table"
+                        tname_upper = tname.upper()
+                        if tname_upper not in existing_pg_tables:
+                            existing_pg_tables.add(tname_upper)
+                            if tname.endswith("_TBD") or tname == "TB_DOMAIN":
+                                created_domains.append(tname)
+                                logger.info("Domain table '%s' created", tname)
+                            else:
+                                created_tables.append(tname)
+                                logger.info("Feature class '%s' created", tname)
+                    elif "CREATE INDEX" in stmt_upper:
+                        parts = stmt_clean.split('"')
+                        idx_name = parts[1] if len(parts) > 1 else "Index"
+                        idx_upper = idx_name.upper()
+                        if idx_upper not in existing_pg_indexes:
+                            existing_pg_indexes.add(idx_upper)
+                            created_indexes.append(idx_name)
+                            logger.info("Spatial index '%s' created", idx_name)
+                    elif "FOREIGN KEY" in stmt_upper:
+                        created_fks += 1
+                    elif "CREATE TRIGGER" in stmt_upper:
+                        parts = stmt_clean.split('"')
+                        trg_name = parts[1] if len(parts) > 1 else "Trigger"
+                        trg_upper = trg_name.upper()
+                        if trg_upper not in existing_pg_triggers:
+                            existing_pg_triggers.add(trg_upper)
+                            created_triggers.append(trg_name)
+                            logger.info("Trigger '%s' activated", trg_name)
+                except Exception as ex:
+                    conn.rollback()
+                    first_line = stmt_clean.splitlines()[0][:120]
+                    failed_statements.append((first_line, str(ex)))
+                    logger.error("SQL Error: %s -> %s", first_line, ex)
 
-                # Ensure all PK columns have sequences attached (upgrades pre-existing tables)
-                logger.info("Ensuring primary key sequences on all tables...")
-                ensure_pk_sequences(conn)
+            # Ensure all PK columns have sequences attached (upgrades pre-existing tables)
+            logger.info("Ensuring primary key sequences on all tables...")
+            ensure_pk_sequences(conn)
 
-                # Column addition sync
-                logger.info("Starting attribute synchronization...")
-                sync_table_columns(sqlite_path, conn, srid)
+            # Column addition sync
+            logger.info("Starting attribute synchronization...")
+            sync_table_columns(sqlite_path, conn, srid)
 
-                # Deletion sync (dropped tables & dropped columns)
-                logger.info("Detecting schema differences and applying deletions...")
-                detect_schema_differences(sqlite_path, conn)
+            # Deletion sync (dropped tables & dropped columns)
+            logger.info("Detecting schema differences and applying deletions...")
+            detect_schema_differences(sqlite_path, conn)
 
-                # Data record sync (upsert)
-                if sync_data_flag:
-                    logger.info("Starting data synchronization (upsert)...")
-                    sync_data(sqlite_path, conn, srid)
+            # Data record sync (upsert)
+            if sync_data_flag:
+                logger.info("Starting data synchronization (upsert)...")
+                sync_data(sqlite_path, conn, srid)
 
-                cursor.close()
-                conn.close()
+            cursor.close()
+            conn.close()
 
-                # Execution Summary
-                logger.info("=== SYNCHRONIZATION SUMMARY ===")
-                logger.info("Feature Classes: %d table(s) %s", len(created_tables),
-                            f"-> {', '.join(created_tables)}" if created_tables else "")
-                logger.info("Domain Tables:   %d table(s) %s", len(created_domains),
-                            f"-> {', '.join(created_domains)}" if created_domains else "")
-                logger.info("Spatial Indexes: %d, FK: %d, Triggers: %d",
-                            len(created_indexes), created_fks, len(created_triggers))
-                if failed_statements:
-                    logger.warning("Partial sync: %d successful, %d failed", success_count, len(failed_statements))
-                else:
-                    logger.info("PostgreSQL synchronization 100%% successful (%d SQL queries)", success_count)
+            # Execution Summary
+            logger.info("=== SYNCHRONIZATION SUMMARY ===")
+            logger.info("Feature Classes: %d table(s) %s", len(created_tables),
+                        f"-> {', '.join(created_tables)}" if created_tables else "")
+            logger.info("Domain Tables:   %d table(s) %s", len(created_domains),
+                        f"-> {', '.join(created_domains)}" if created_domains else "")
+            logger.info("Spatial Indexes: %d, FK: %d, Triggers: %d",
+                        len(created_indexes), created_fks, len(created_triggers))
+            if failed_statements:
+                logger.warning("Partial sync: %d successful, %d failed", success_count, len(failed_statements))
+            else:
+                logger.info("PostgreSQL synchronization 100%% successful (%d SQL queries)", success_count)
 
-            except ImportError:
-                logger.warning("Module 'psycopg2' not installed. Install with: pip install psycopg2-binary")
-            except Exception as e:
-                logger.error("Error while applying to PostgreSQL: %s", e, exc_info=True)
-        else:
-            logger.info("No PostgreSQL credentials provided. Only the SQL file was generated.")
+        except ImportError:
+            logger.warning("Module 'psycopg2' not installed. Install with: pip install psycopg2-binary")
+        except Exception as e:
+            logger.error("Error while applying to PostgreSQL: %s", e, exc_info=True)
     else:
-        logger.error("DDL conversion failed: %s", result.stderr)
+        logger.info("No PostgreSQL credentials provided. Only the SQL file was generated.")
 
 
 # =============================================================================
@@ -1245,7 +1481,7 @@ if HAS_WATCHDOG:
 def watch_file(sqlite_path: str = None, search_dir: str = None, model_name: str = None,
                output_sql: str = None, pg_host="localhost", pg_port=5432, pg_user=None,
                pg_pass=None, pg_db=None, srid: int = 2154, run_initial_sync: bool = False,
-               sync_data_flag: bool = False):
+               sync_data_flag: bool = False, stop_event=None):
     """
     Starts the continuous multi-model monitoring service using Watchdog or Polling mode.
     """
@@ -1264,7 +1500,7 @@ def watch_file(sqlite_path: str = None, search_dir: str = None, model_name: str 
     if sqlite_path and os.path.exists(sqlite_path):
         raw_name = Path(sqlite_path).stem
         target_db = pg_db or clean_postgres_db_name(raw_name)
-        out_sql = output_sql or f"schema_{target_db}.sql"
+        out_sql = normalize_output_sql_path(output_sql or f"schema_{target_db}.sql")
         initial_list = [{
             "path": sqlite_path,
             "model_name": raw_name,
@@ -1328,7 +1564,7 @@ def watch_file(sqlite_path: str = None, search_dir: str = None, model_name: str 
 
 
 def _watch_with_watchdog(watch_dir, pg_host, pg_port, pg_user, pg_pass, pg_db, srid,
-                          output_sql, sync_data_flag, model_name):
+                          output_sql, sync_data_flag, model_name, stop_event=None):
     """Event-driven watchdog observer runner."""
     handler = _WatchdogHandler(
         pg_host=pg_host, pg_port=pg_port, pg_user=pg_user, pg_pass=pg_pass,
@@ -1339,18 +1575,18 @@ def _watch_with_watchdog(watch_dir, pg_host, pg_port, pg_user, pg_pass, pg_db, s
     observer.schedule(handler, watch_dir, recursive=True)
     observer.start()
     try:
-        while True:
+        while not (stop_event and stop_event.is_set()):
             time.sleep(1)
     except KeyboardInterrupt:
         logger.info("Stopping watchdog observer...")
-        observer.stop()
+    observer.stop()
     observer.join()
     logger.info("Multi-model monitoring service stopped.")
 
 
 def _watch_with_polling(sqlite_path, search_dir, model_name, output_sql,
                          pg_host, pg_port, pg_user, pg_pass, pg_db, srid,
-                         monitored, sync_data_flag):
+                         monitored, sync_data_flag, stop_event=None):
     """Timer-driven polling observer fallback runner."""
     logger.info("Polling mode active (every %ds). Press CTRL+C to stop.", CHECK_INTERVAL_SECONDS)
 
@@ -1358,14 +1594,14 @@ def _watch_with_polling(sqlite_path, search_dir, model_name, output_sql,
         heartbeat_counter = 0
         HEARTBEAT_EVERY = 5
 
-        while True:
+        while not (stop_event and stop_event.is_set()):
             time.sleep(CHECK_INTERVAL_SECONDS)
             heartbeat_counter += 1
 
             if sqlite_path and os.path.exists(sqlite_path):
                 raw_name = Path(sqlite_path).stem
                 target_db = pg_db or clean_postgres_db_name(raw_name)
-                out_sql = output_sql or f"schema_{target_db}.sql"
+                out_sql = normalize_output_sql_path(output_sql or f"schema_{target_db}.sql")
                 active_models = [{
                     "path": sqlite_path,
                     "model_name": raw_name,
@@ -1419,11 +1655,63 @@ def _watch_with_polling(sqlite_path, search_dir, model_name, output_sql,
         logger.info("Multi-model monitoring service stopped.")
 
 
+def find_config_env_file() -> str | None:
+    """Finds a persistent config file in AppData first, then local fallback paths."""
+    script_dir = Path(__file__).resolve().parent
+    cwd = Path.cwd()
+    appdata_dir = Path(os.environ.get("APPDATA", Path.home())) / "PostMapLive"
+    candidates = [
+        appdata_dir / "config.env",
+        appdata_dir / ".env",
+        script_dir / "config.env",
+        script_dir / ".env",
+        script_dir.parent / "config.env",
+        script_dir.parent / ".env",
+        cwd / "config.env",
+        cwd / ".env",
+    ]
+    for p in candidates:
+        if p.is_file():
+            return str(p)
+    return str(appdata_dir / "config.env")
+
+
+def load_config_env(env_path: str = None) -> dict:
+    """
+    Reads config.env or .env file from script directory, parent directory, or custom path.
+    Returns dictionary of configuration parameters.
+    """
+    if env_path is None:
+        env_path = find_config_env_file()
+
+    config = {}
+    if env_path and os.path.exists(env_path):
+        try:
+            with open(env_path, "r", encoding="utf-8") as f:
+                for line in f:
+                    line = line.strip()
+                    if not line or line.startswith("#") or "=" not in line:
+                        continue
+                    key, val = line.split("=", 1)
+                    config[key.strip().upper()] = val.strip().strip("'\"")
+            logger.info("Loaded environment credentials from: %s", env_path)
+        except Exception as e:
+            logger.warning("Could not parse env file '%s': %s", env_path, e)
+    return config
+
+
 # =============================================================================
 # 11. CLI ENTRY POINT
 # =============================================================================
 
-if __name__ == "__main__":
+def build_arg_parser():
+    """
+    Builds and returns the CLI argument parser.
+    Exposed as a public function so gui_tray_app.py can construct args
+    programmatically without calling parse_args() from sys.argv.
+    """
+    env_cfg = load_config_env()
+
     parser = argparse.ArgumentParser(
         description="Monitors one or more Autodesk Data Models and automatically applies DDL to PostgreSQL."
     )
@@ -1432,14 +1720,21 @@ if __name__ == "__main__":
     parser.add_argument("--name", dest="model_name", default=None, help="Specific Industry Model name to search for (optional)")
     parser.add_argument("--out", dest="output_sql", default=None, help="Generated SQL file (default: schema_<dbname>.sql)")
 
-    # PostgreSQL parameters
-    parser.add_argument("--pg-host", dest="pg_host", default="localhost", help="PostgreSQL server host (default: localhost)")
-    parser.add_argument("--pg-port", dest="pg_port", type=int, default=5432, help="PostgreSQL port (default: 5432)")
-    parser.add_argument("--pg-user", dest="pg_user", default=os.getenv("PG_USER"), help="PostgreSQL username (e.g. postgres)")
-    parser.add_argument("--pg-pass", dest="pg_pass", default=os.getenv("PG_PASSWORD"), help="PostgreSQL password")
-    parser.add_argument("--pg-db", dest="pg_db", default=None, help="Target PostgreSQL database name (optional)")
+    # PostgreSQL parameters (Reads from config.env / os.getenv with CLI fallback)
+    default_host = env_cfg.get("PG_HOST") or os.getenv("PG_HOST") or "localhost"
+    default_port = int(env_cfg.get("PG_PORT") or os.getenv("PG_PORT") or 5432)
+    default_user = env_cfg.get("PG_USER") or os.getenv("PG_USER")
+    default_pass = env_cfg.get("PG_PASS") or env_cfg.get("PG_PASSWORD") or os.getenv("PG_PASSWORD")
+    default_db   = env_cfg.get("PG_DB") or os.getenv("PG_DB")
+    default_srid = int(env_cfg.get("PG_SRID") or os.getenv("PG_SRID") or 2154)
 
-    parser.add_argument("--srid", type=int, default=2154, help="EPSG / SRID spatial code for PostGIS (default: 2154)")
+    parser.add_argument("--pg-host", dest="pg_host", default=default_host, help="PostgreSQL server host (default: localhost)")
+    parser.add_argument("--pg-port", dest="pg_port", type=int, default=default_port, help="PostgreSQL port (default: 5432)")
+    parser.add_argument("--pg-user", dest="pg_user", default=default_user, help="PostgreSQL username (e.g. postgres)")
+    parser.add_argument("--pg-pass", dest="pg_pass", default=default_pass, help="PostgreSQL password")
+    parser.add_argument("--pg-db", dest="pg_db", default=default_db, help="Target PostgreSQL database name (optional)")
+
+    parser.add_argument("--srid", type=int, default=default_srid, help="EPSG / SRID spatial code for PostGIS (default: 2154)")
     parser.add_argument("--initial-sync", action="store_true", help="Execute an immediate synchronization at startup.")
 
     # Data sync & logging options
@@ -1450,22 +1745,42 @@ if __name__ == "__main__":
     parser.add_argument("--log-file", dest="log_file", default="connector_sync.log",
                         help="Path to log file (default: connector_sync.log)")
     parser.add_argument("-v", "--verbose", action="store_true", help="Enable verbose/debug logging")
+    return parser
 
-    args = parser.parse_args()
 
-    setup_logging(log_file=args.log_file, verbose=args.verbose)
+def main(args=None, stop_event=None):
+    """
+    Main entry point for the sync service.
+    Can be called programmatically from gui_tray_app.py with pre-parsed args
+    and a threading.Event() stop_event to allow graceful shutdown.
+
+    Args:
+        args: Parsed argparse.Namespace object (or None to parse from sys.argv).
+        stop_event: threading.Event() — set it to request service shutdown.
+    """
+    parser = build_arg_parser()
+    if args is None:
+        args = parser.parse_args()
+
+    setup_logging(log_file=getattr(args, 'log_file', 'connector_sync.log'),
+                  verbose=getattr(args, 'verbose', False))
 
     watch_file(
-        sqlite_path=args.sqlite_file,
-        search_dir=args.search_dir,
-        model_name=args.model_name,
-        output_sql=args.output_sql,
-        pg_host=args.pg_host,
-        pg_port=args.pg_port,
-        pg_user=args.pg_user,
-        pg_pass=args.pg_pass,
-        pg_db=args.pg_db,
-        srid=args.srid,
-        run_initial_sync=args.initial_sync,
-        sync_data_flag=args.sync_data,
+        sqlite_path=getattr(args, 'sqlite_file', None),
+        search_dir=getattr(args, 'search_dir', None),
+        model_name=getattr(args, 'model_name', None),
+        output_sql=getattr(args, 'output_sql', None),
+        pg_host=getattr(args, 'pg_host', 'localhost'),
+        pg_port=getattr(args, 'pg_port', 5432),
+        pg_user=getattr(args, 'pg_user', None),
+        pg_pass=getattr(args, 'pg_pass', None),
+        pg_db=getattr(args, 'pg_db', None),
+        srid=getattr(args, 'srid', 2154),
+        run_initial_sync=getattr(args, 'initial_sync', False),
+        sync_data_flag=getattr(args, 'sync_data', True),
+        stop_event=stop_event,
     )
+
+
+if __name__ == "__main__":
+    main()

@@ -1,0 +1,86 @@
+; ===========================================================================
+; Inno Setup Script
+; PROJECT : Autodesk Industry Model to PostgreSQL/PostGIS Connector
+; PHASE   : Phase 6 - Deployment & Industrialization
+; ===========================================================================
+;
+; INSTRUCTIONS:
+;   1. Install Inno Setup from https://jrsoftware.org/ispage.php (free)
+;   2. Build the .exe first:  python scripts/build_exe.py
+;   3. Open this file in Inno Setup Compiler and click Build > Compile
+;   4. Find the installer in:  installer_output/Setup_PostMapLive.exe
+; ===========================================================================
+
+[Setup]
+AppId={{B7F3A1C2-4E2D-4F1A-91C3-A2B3C4D5E6F7}}
+AppName=PostMap Live
+AppVersion=1.0.0
+AppPublisher=infranet engineering 
+AppCopyright=Copyright (C) 2026
+
+; Installation directory (Program Files by default)
+DefaultDirName={autopf}\PostMap Live
+DefaultGroupName=PostMap Live
+
+; No admin required — tray app runs in user context
+PrivilegesRequired=lowest
+PrivilegesRequiredOverridesAllowed=dialog
+
+; Output installer file
+OutputDir=installer_output
+OutputBaseFilename=Setup_PostMapLive
+
+; Compression
+Compression=lzma2/ultra64
+SolidCompression=yes
+InternalCompressLevel=ultra64
+
+; Installer appearance
+WizardStyle=modern
+SetupIconFile=assets\app_logo.ico
+
+; Minimum Windows version: Windows 10
+MinVersion=10.0
+
+[Languages]
+Name: "english"; MessagesFile: "compiler:Default.isl"
+
+[Files]
+; Main executable (compiled by PyInstaller)
+Source: "dist\PostMapLive.exe"; DestDir: "{app}"; Flags: ignoreversion
+
+; Optional: README / User Guide
+; Source: "Phase 6-Implementation-Testing\06-testing-user-guide_EN.md"; DestDir: "{app}"; Flags: ignoreversion
+
+[Icons]
+; Start Menu shortcut
+Name: "{group}\PostMap Live";           Filename: "{app}\PostMapLive.exe"
+Name: "{group}\Uninstall PostMap Live"; Filename: "{uninstallexe}"
+
+; Desktop shortcut (optional)
+Name: "{userdesktop}\PostMap Live";     Filename: "{app}\PostMapLive.exe"; Tasks: desktopicon
+
+[Registry]
+; Auto-start at Windows logon via HKCU registry (reliable, no admin needed)
+Root: HKCU; Subkey: "Software\Microsoft\Windows\CurrentVersion\Run"; ValueType: string; ValueName: "PostMapLive"; ValueData: """{app}\PostMapLive.exe"""; Tasks: autostart; Flags: uninsdeletevalue
+
+[Tasks]
+Name: "desktopicon"; Description: "Create a &desktop shortcut"; GroupDescription: "Additional icons:"
+Name: "autostart";   Description: "Launch automatically at Windows startup"; GroupDescription: "Startup options:"; 
+
+[Run]
+; Launch the application immediately after installation finishes
+Filename: "{app}\PostMapLive.exe"; Description: "Launch PostMap Live now"; Flags: nowait postinstall skipifsilent
+
+[UninstallRun]
+; Kill the process before uninstalling
+Filename: "taskkill"; Parameters: "/F /IM PostMapLive.exe"; RunOnceId: "KillConnector"; Flags: runhidden
+
+[UninstallDelete]
+; Clean up config and log files
+Type: files; Name: "{app}\connector_config.json"
+Type: files; Name: "{app}\connector.log"
+
+[Messages]
+FinishedHeadingLabel=Installation complete!
+FinishedLabelNoIcons=PostMap Live has been installed and is now running in the system tray (near the clock). You can right-click the tray icon to configure your PostgreSQL connection.
