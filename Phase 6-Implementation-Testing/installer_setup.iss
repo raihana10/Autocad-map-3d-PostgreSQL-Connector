@@ -78,8 +78,9 @@ Filename: "taskkill"; Parameters: "/F /IM PostMapLive.exe"; RunOnceId: "KillConn
 
 [UninstallDelete]
 ; Clean up config and log files
-Type: files; Name: "{app}\connector_config.json"
-Type: files; Name: "{app}\connector.log"
+Type: files; Name: "{app}\config.env"
+Type: files; Name: "{app}\watch_and_sync.log"
+Type: filesandordirs; Name: "{userappdata}\PostMapLive"
 
 [Messages]
 FinishedHeadingLabel=Installation complete!
